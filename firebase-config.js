@@ -1,3 +1,8 @@
-// IMPORTANT: Paste the SAME Firebase Web App configuration used by SKMedKART Admin.
-// Configure this file once in both apps with the exact same values.
-window.SKMED_FIREBASE_CONFIG={apiKey:'PASTE_API_KEY',authDomain:'PASTE_PROJECT.firebaseapp.com',projectId:'PASTE_PROJECT_ID',storageBucket:'PASTE_PROJECT.firebasestorage.app',messagingSenderId:'PASTE_SENDER_ID',appId:'PASTE_APP_ID'};
+window.SKMED_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA",
+  authDomain: "skmedkart.firebaseapp.com",
+  projectId: "skmedkart",
+  storageBucket: "skmedkart.firebasestorage.app",
+  messagingSenderId: "921893232974",
+  appId: "1:921893232974:web:e7fab8eae5eaaec6597e1f"
+};
