@@ -18,8 +18,40 @@ async function loadAll(){if(!configured){products=get('products',[]);currentOrde
 function renderAll(){renderDashboard();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderReports();renderReminders();renderSuppliers();renderSelects()}
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
 function renderDashboard(){const low=products.filter(p=>Number(p.stock||0)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>Number(p.stock||0)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const alerts=[...zero.map(p=>'OUT OF STOCK: '+p.name),...low.filter(p=>Number(p.stock)>0).map(p=>'LOW STOCK: '+p.name+' ('+p.stock+')'),...exp.map(b=>expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)];$('alerts').innerHTML=alerts.map(x=>'<div class="warning">'+esc(x)+'</div>').join('')||'<div class="good">No urgent stock or expiry alerts.</div>';$('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
-function renderSelects(){const selected=$('bMedicine').value,selectedPu=$('puProduct').value;const pOpt='<option value="">Select medicine</option>'+products.map(p=>'<option value="'+esc(p.id)+'">'+esc(p.name)+' • Stock '+Number(p.stock||0)+'</option>').join('');$('bMedicine').innerHTML=pOpt;$('puProduct').innerHTML=pOpt;if(selected)$('bMedicine').value=selected;if(selectedPu)$('puProduct').value=selectedPu;const dl=$('supplierOptions');if(dl)dl.innerHTML=suppliers.map(x=>'<option value="'+esc(x.name)+'">'+esc(x.mobile||'')+'</option>').join('');updateBatchOptions()}
-window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bMedicine').addEventListener('change',()=>{updateBatchOptions();const p=products.find(x=>x.id===$('bMedicine').value);if(p)$('bPrice').value=Number(p.price||0)});$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
+function renderSelects(){
+ const selected=$('bMedicine').value,selectedPu=$('puProduct').value;
+ const billSearch=$('bMedicineSearch'),purchaseSearch=$('puProductSearch');
+ const billOptions=$('bMedicineOptions'),purchaseOptions=$('puProductOptions');
+ const options=products.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name)+' • Stock '+Number(p.stock||0)+'</option>').join('');
+ if(billOptions)billOptions.innerHTML=options;
+ if(purchaseOptions)purchaseOptions.innerHTML=options;
+ const currentBill=products.find(p=>p.id===selected);
+ const currentPurchase=products.find(p=>p.id===selectedPu);
+ if(currentBill&&billSearch)billSearch.value=currentBill.name;
+ if(currentPurchase&&purchaseSearch)purchaseSearch.value=currentPurchase.name;
+ const dl=$('supplierOptions');
+ if(dl)dl.innerHTML=suppliers.map(x=>'<option value="'+esc(x.name)+'">'+esc(x.mobile||'')+'</option>').join('');
+ updateBatchOptions();
+}
+function findMedicineBySearch(value){
+ const q=String(value||'').trim().toLowerCase();
+ return products.find(p=>String(p.name||'').trim().toLowerCase()===q)||null;
+}
+function syncBillMedicine(){
+ const p=findMedicineBySearch($('bMedicineSearch').value);
+ $('bMedicine').value=p?p.id:'';
+ updateBatchOptions();
+ if(p)$('bPrice').value=Number(p.price||0);
+}
+function syncPurchaseMedicine(){
+ const p=findMedicineBySearch($('puProductSearch').value);
+ $('puProduct').value=p?p.id:'';
+}
+$('bMedicineSearch').addEventListener('input',syncBillMedicine);
+$('bMedicineSearch').addEventListener('change',syncBillMedicine);
+$('puProductSearch').addEventListener('input',syncPurchaseMedicine);
+$('puProductSearch').addEventListener('change',syncPurchaseMedicine);
+window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
 window.addBillItem=()=>{const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0),discount=Math.max(0,Number($('bDiscount').value)||0),gst=Math.max(0,Number($('bGst').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price,discount,gst});renderBilling()};
 function billTotals(items=billCart){const sub=items.reduce((s,x)=>s+x.qty*x.price,0),discount=items.reduce((s,x)=>s+x.discount,0),gst=items.reduce((s,x)=>s+Math.max(0,(x.qty*x.price-x.discount))*x.gst/100,0);return {subtotal:sub,discount,gst,grandTotal:sub-discount+gst}}
 function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};window.clearBill=()=>{billCart=[];renderBilling()};
