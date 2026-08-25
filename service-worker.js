@@ -1,4 +1,4 @@
-const CACHE='skmedkart-v58-pwa-final-20260825';
+const CACHE='skmedkart-v59-discount-type-20260825';
 const BASE='/SKMedKART-Admin/';
 const ASSETS=[
   BASE,
