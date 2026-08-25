@@ -1,1 +1,0 @@
-Install App button fixed with Chrome native prompt + built-in fallback guide. Added Cancel Order option. Cancelled orders cannot be directly billed. Already billed orders must use Return Bill.
