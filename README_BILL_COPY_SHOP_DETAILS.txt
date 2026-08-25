@@ -4,7 +4,7 @@ Updated:
 - Sri Krishna Medicals bill header
 - Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu
 - Phone: 8300363317
-- Drug Licence No: TN/DPI/01386/20,21
+- Drug Licence No: TN/DPI/01386/20,21<br>FSSAI Licence No: 22422039000512
 
 Applied to:
 - View Bill
