@@ -31,7 +31,7 @@
 <section id="settings" class="view hidden"><div class="card"><h2>⚙️ Settings</h2><p class="small">Live Firebase data mode is controlled by firebase-config.js.</p><div class="refreshRow"><button onclick="loadAll(true)">🔄 Refresh Data</button><button class="secondary" onclick="installApp()">📲 Install App</button><button class="danger" onclick="adminLogout()">Logout</button></div></div><div class="card"><h2>💾 Backup & Restore</h2><p class="small">Create a JSON backup of products, batches, bills, purchases, suppliers, customers, reminders, orders and stock movements. Restore will safely write the backup data back to the same collections.</p><button class="ok" onclick="downloadBackup()">⬇️ Download Full Backup</button><input id="restoreFile" type="file" accept="application/json,.json" class="hidden"><button class="secondary" onclick="document.getElementById('restoreFile').click()">📂 Choose Backup File</button><p id="restoreStatus" class="small"></p></div></section>
 </main>
 <nav id="bottomNav" class="bottomNav hidden"><button class="navBtn tab active" data-view="dashboard"><span class="ico">🏠</span>Home</button><button class="navBtn tab" data-view="orders"><span class="ico">📦</span>Orders</button><button class="navBtn tab" data-view="billing"><span class="ico">🧾</span>Billing</button><button class="navBtn tab" data-view="billhistory"><span class="ico">📚</span>History</button><button class="navBtn tab" data-view="products"><span class="ico">💊</span>Stock</button><button class="navBtn tab" data-view="purchase"><span class="ico">🏢</span>Purchase</button><button class="navBtn tab" data-view="reports"><span class="ico">📊</span>Reports</button><button class="navBtn tab" data-view="settings"><span class="ico">⚙️</span>Settings</button></nav>
-<div id="billModal" class="billModal hidden"><div class="billModalCard"><button class="modalClose" onclick="closeBillView()">✕</button><div id="billModalContent"></div></div></div><script src="firebase-config.js?v=20260825-v59-discount-type"></script><script type="module" src="admin.js?v=20260825-v59-discount-type"></script><div id="installGuide" class="installGuide hidden" role="dialog" aria-modal="true">
+<div id="billModal" class="billModal hidden"><div class="billModalCard"><button class="modalClose" onclick="closeBillView()">✕</button><div id="billModalContent"></div></div></div><script src="firebase-config.js?v=20260825-v60-order-notification"></script><script type="module" src="admin.js?v=20260825-v60-order-notification"></script><div id="installGuide" class="installGuide hidden" role="dialog" aria-modal="true">
 <div class="installGuideCard">
 <h2>📲 Install SKMedKART</h2>
 <p id="installGuideText">The browser has not marked this page as installable yet. Do not create a shortcut. Close this message, wait a few seconds, refresh once, and try the Install App button again.</p>
@@ -82,4 +82,147 @@ if('serviceWorker' in navigator)window.addEventListener('load',async()=>{
   }catch(e){console.warn('Service worker registration failed',e)}
 });
 </script><!-- FSSAI Licence No: 22422039000512 -->
+
+<style id="sk-order-notification-style">
+#skOrderToast{position:fixed;top:76px;left:50%;transform:translate(-50%,-18px);z-index:99999;width:min(92vw,460px);padding:16px 18px;border-radius:18px;background:#173a63;color:#fff;box-shadow:0 14px 35px rgba(0,0,0,.28);opacity:0;pointer-events:none;transition:.25s ease;font-weight:700}
+#skOrderToast.show{opacity:1;transform:translate(-50%,0)}
+#skOrderToast .sub{display:block;font-size:13px;font-weight:500;opacity:.88;margin-top:4px}
+.skOrderBadge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;margin-left:5px;border-radius:999px;background:#d93025;color:#fff;font-size:11px;font-weight:800}
+</style>
+<div id="skOrderToast" aria-live="assertive">🔔 New Customer Order Received<span class="sub" id="skOrderToastText">A new order has arrived.</span></div>
+
+<script id="sk-order-notification-script">
+(function(){
+  const seenOrders = new Set();
+  let observerStarted = false;
+  let audioUnlocked = false;
+  let audioCtx = null;
+  let newOrderCount = 0;
+  let initialized = false;
+
+  function unlockAudio(){
+    try{
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if(!AC) return;
+      if(!audioCtx) audioCtx = new AC();
+      if(audioCtx.state === 'suspended') audioCtx.resume();
+      audioUnlocked = true;
+    }catch(e){}
+  }
+
+  ['pointerdown','touchstart','keydown'].forEach(ev=>{
+    window.addEventListener(ev, unlockAudio, {once:false, passive:true});
+  });
+
+  function playOrderSound(){
+    if(!audioUnlocked) return;
+    try{
+      unlockAudio();
+      if(!audioCtx) return;
+      const now = audioCtx.currentTime;
+      [[880,0],[1175,.16],[1568,.32]].forEach(([freq,delay])=>{
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + delay);
+        gain.gain.setValueAtTime(0.0001, now + delay);
+        gain.gain.exponentialRampToValueAtTime(.22, now + delay + .02);
+        gain.gain.exponentialRampToValueAtTime(.0001, now + delay + .13);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(now + delay); osc.stop(now + delay + .16);
+      });
+    }catch(e){ console.warn('Order notification sound unavailable', e); }
+  }
+
+  function orderKey(el){
+    const dataId = el.getAttribute('data-id') || el.getAttribute('data-order-id') || '';
+    if(dataId) return dataId;
+    const text = (el.innerText || el.textContent || '').trim();
+    const match = text.match(/\bSKM[\w-]{6,}\b/i);
+    if(match) return match[0].toUpperCase();
+    const phone = text.match(/\b[6-9]\d{9}\b/);
+    return phone ? (phone[0] + '|' + text.slice(0,90)) : text.slice(0,140);
+  }
+
+  function getOrderItems(root){
+    if(!root) return [];
+    const direct = [...root.children].filter(x => (x.innerText || '').trim().length > 8);
+    return direct.length ? direct : [...root.querySelectorAll('[data-id],[data-order-id],.order,.order-card,.card')];
+  }
+
+  function updateBadge(){
+    const btn = document.querySelector('.tab[data-view="orders"],.navBtn[data-view="orders"]');
+    if(!btn) return;
+    let badge = btn.querySelector('.skOrderBadge');
+    if(newOrderCount <= 0){ if(badge) badge.remove(); return; }
+    if(!badge){
+      badge = document.createElement('span');
+      badge.className = 'skOrderBadge';
+      btn.appendChild(badge);
+    }
+    badge.textContent = newOrderCount > 99 ? '99+' : newOrderCount;
+  }
+
+  function showNewOrder(item){
+    newOrderCount++;
+    updateBadge();
+    const text = (item.innerText || item.textContent || '').replace(/\s+/g,' ').trim();
+    const id = orderKey(item);
+    const toast = document.getElementById('skOrderToast');
+    const toastText = document.getElementById('skOrderToastText');
+    if(toastText) toastText.textContent = id ? ('Order ' + id + ' has arrived.') : (text.slice(0,80) || 'A new order has arrived.');
+    if(toast){
+      toast.classList.add('show');
+      clearTimeout(window.__skOrderToastTimer);
+      window.__skOrderToastTimer = setTimeout(()=>toast.classList.remove('show'), 6500);
+    }
+    playOrderSound();
+    if(navigator.vibrate) navigator.vibrate([120,60,120]);
+  }
+
+  function scan(root, notify){
+    const items = getOrderItems(root);
+    items.forEach(item=>{
+      const key = orderKey(item);
+      if(!key || key.length < 3) return;
+      if(!seenOrders.has(key)){
+        seenOrders.add(key);
+        if(notify) showNewOrder(item);
+      }
+    });
+  }
+
+  function start(){
+    if(observerStarted) return;
+    const root = document.getElementById('ordersList');
+    if(!root){ setTimeout(start, 500); return; }
+
+    // First scan only records existing orders; it never plays a sound.
+    scan(root, false);
+    initialized = true;
+
+    const mo = new MutationObserver(mutations=>{
+      let hasChanges = false;
+      mutations.forEach(m=>{
+        if(m.type === 'childList' && m.addedNodes.length) hasChanges = true;
+      });
+      if(hasChanges && initialized) scan(root, true);
+    });
+    mo.observe(root, {childList:true, subtree:false});
+    observerStarted = true;
+
+    const ordersButton = document.querySelector('.tab[data-view="orders"],.navBtn[data-view="orders"]');
+    if(ordersButton){
+      ordersButton.addEventListener('click', ()=>{
+        newOrderCount = 0;
+        updateBadge();
+      });
+    }
+  }
+
+  if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+</script>
+
 </body></html>
