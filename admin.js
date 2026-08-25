@@ -21,10 +21,6 @@ function renderDashboard(){const low=products.filter(p=>Number(p.stock||0)<=Numb
 function renderSelects(){
  const selected=$('bMedicine').value,selectedPu=$('puProduct').value;
  const billSearch=$('bMedicineSearch'),purchaseSearch=$('puProductSearch');
- const billOptions=$('bMedicineOptions'),purchaseOptions=$('puProductOptions');
- const options=products.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name)+' • Stock '+Number(p.stock||0)+'</option>').join('');
- if(billOptions)billOptions.innerHTML=options;
- if(purchaseOptions)purchaseOptions.innerHTML=options;
  const currentBill=products.find(p=>p.id===selected);
  const currentPurchase=products.find(p=>p.id===selectedPu);
  if(currentBill&&billSearch)billSearch.value=currentBill.name;
@@ -39,25 +35,61 @@ function findMedicineBySearch(value){
  const starts=products.filter(p=>String(p.name||'').trim().toLowerCase().startsWith(q)); if(starts.length===1)return starts[0];
  const contains=products.filter(p=>String(p.name||'').trim().toLowerCase().includes(q)); return contains.length===1?contains[0]:null;
 }
-function syncBillMedicine(){
- const p=findMedicineBySearch($('bMedicineSearch').value);
+function medicineMatches(q){
+ q=String(q||'').trim().toLowerCase();
+ if(!q)return products.slice(0,30);
+ return products.filter(p=>String(p.name||'').toLowerCase().includes(q)).slice(0,30);
+}
+function showMedicineSuggestions(inputId,boxId,onPick){
+ const input=$(inputId),box=$(boxId); if(!input||!box)return;
+ const render=()=>{
+   const list=medicineMatches(input.value);
+   if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
+   box.innerHTML=list.map(p=>'<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+Number(p.stock||0)+'</small></div>').join('');
+   box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
+      e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
+      input.value=p.name; box.classList.remove('show'); onPick(p);
+   }));
+   box.classList.add('show');
+ };
+ input.addEventListener('input',()=>{onPick(null);render()});
+ input.addEventListener('focus',render);
+ input.addEventListener('keydown',e=>{if(e.key==='Escape')box.classList.remove('show')});
+ document.addEventListener('pointerdown',e=>{if(!box.contains(e.target)&&e.target!==input)box.classList.remove('show')});
+ input.addEventListener('change',()=>{const p=findMedicineBySearch(input.value);if(p){onPick(p);input.value=p.name}else onPick(null)});
+}
+function pickBillMedicine(p){
  $('bMedicine').value=p?p.id:'';
  updateBatchOptions();
  if(p)$('bPrice').value=Number(p.price||0);
 }
-function syncPurchaseMedicine(){
- const p=findMedicineBySearch($('puProductSearch').value);
+function pickPurchaseMedicine(p){
  $('puProduct').value=p?p.id:'';
- if(p){$('puProductSearch').dataset.productFound='yes';}else{$('puProductSearch').dataset.productFound='no';}
+ if($('puProductSearch'))$('puProductSearch').dataset.productFound=p?'yes':'no';
 }
-$('bMedicineSearch').addEventListener('input',syncBillMedicine);
-$('bMedicineSearch').addEventListener('change',syncBillMedicine);
-$('puProductSearch').addEventListener('input',syncPurchaseMedicine);
-$('puProductSearch').addEventListener('change',syncPurchaseMedicine);
+function syncBillMedicine(){pickBillMedicine(findMedicineBySearch($('bMedicineSearch').value))}
+function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puProductSearch').value))}
+showMedicineSuggestions('bMedicineSearch','bMedicineSuggest',pickBillMedicine);
+showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedicine);
 window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
-window.addBillItem=()=>{const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0),discount=Math.max(0,Number($('bDiscount').value)||0),gst=Math.max(0,Number($('bGst').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price,discount,gst});renderBilling()};
-function billTotals(items=billCart){const sub=items.reduce((s,x)=>s+x.qty*x.price,0),discount=items.reduce((s,x)=>s+x.discount,0),gst=items.reduce((s,x)=>s+Math.max(0,(x.qty*x.price-x.discount))*x.gst/100,0);return {subtotal:sub,discount,gst,grandTotal:sub-discount+gst}}
-function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';renderBilling()};
+window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price});renderBilling()};
+/* Discount is a bill-level rupee amount; GST is a bill-level percentage.
+   Recalculate from the live inputs so changing either after adding items updates totals immediately. */
+function billTotals(items=billCart){
+ const sub=items.reduce((sum,x)=>sum+Number(x.qty||0)*Number(x.price||0),0);
+ const discInput=$('bDiscount'),gstInput=$('bGst');
+ const legacyDiscount=items.reduce((sum,x)=>sum+Number(x.discount||0),0);
+ const discount=Math.min(sub,Math.max(0,discInput?Number(discInput.value||0):legacyDiscount));
+ const gstRate=Math.max(0,gstInput?Number(gstInput.value||0):0);
+ const taxable=Math.max(0,sub-discount);
+ const gst=taxable*gstRate/100;
+ return {subtotal:sub,discount,gst,gstRate,grandTotal:taxable+gst}
+}
+function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
+window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;renderBilling()};
+/* Live billing total update when Discount ₹ or GST % changes */
+window.recalculateBillTotals=()=>renderBilling();
+['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
 window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim(),invoiceNumber='SKM-'+today().replaceAll('-','')+'-'+String(Date.now()).slice(-6)+'-'+uid().slice(-3).toUpperCase();const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};try{if(configured){const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
 function billHtml(b){return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title><style>body{font-family:Arial;padding:20px;max-width:760px;margin:auto}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:7px;text-align:left}.r{text-align:right}</style></head><body><h2>Sri Krishna Medicals, Pennagaram</h2><p>Licence No: TN/DPI/01386/20,21</p><h3>Invoice '+esc(b.invoiceNumber)+'</h3><p><b>Date:</b> '+esc(b.billDate)+'<br><b>Customer:</b> '+esc(b.customerName)+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed By:</b> '+esc(b.doctor||'-')+'</p><table><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>'+b.items.map(i=>'<tr><td>'+esc(i.name)+'</td><td>'+esc(i.batchNumber)+'</td><td>'+i.qty+'</td><td>'+money(i.price)+'</td><td>'+money(i.qty*i.price)+'</td></tr>').join('')+'</table><p>Subtotal: '+money(b.subtotal)+'<br>Discount: '+money(b.discount)+'<br>GST: '+money(b.gst)+'</p><h3>Grand Total: '+money(b.grandTotal)+'</h3><p>Payment: '+esc(b.paymentMode)+'<br>Note: '+esc(b.note||'-')+'</p></body></html>'}
 function findBill(id){return bills.find(b=>b.id===id||b.invoiceNumber===id)}
