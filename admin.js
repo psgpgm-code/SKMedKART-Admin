@@ -82,7 +82,40 @@ function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puP
 showMedicineSuggestions('bMedicineSearch','bMedicineSuggest',pickBillMedicine);
 showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedicine);
 window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
-window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price});renderBilling()};
+window.addBillItem=()=>{
+  if(!$('bMedicine').value){
+    const typed=findMedicineBySearch($('bMedicineSearch').value);
+    if(typed)pickBillMedicine(typed);
+  }
+  const pid=$('bMedicine').value;
+  const bid=$('bBatch').value;
+  const qty=Math.max(1,Number($('bQty').value)||1);
+  const price=Math.max(0,Number($('bPrice').value)||0);
+  const p=products.find(x=>x.id===pid);
+  const b=batches.find(x=>x.id===bid);
+
+  if(!p)return alert('Please select a medicine first.');
+  if(!b)return alert('Please select the batch for '+p.name+'.');
+  if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');
+
+  const existing=Number(billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0));
+  if(Number(b.stock||0)<existing+qty)return alert('Insufficient batch stock.');
+
+  // Same medicine + same batch: merge quantity instead of creating a duplicate row.
+  const same=billCart.find(x=>x.productId===pid&&x.batchId===bid&&Number(x.price)===price);
+  if(same)same.qty+=qty;
+  else billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price});
+
+  // Keep the current bill/customer, but clear only the medicine entry fields.
+  $('bMedicineSearch').value='';
+  $('bMedicine').value='';
+  $('bBatch').innerHTML='<option value="">Select batch</option>';
+  $('bQty').value=1;
+  $('bPrice').value='';
+  renderBilling();
+  const box=$('bMedicineSearch');
+  if(box){box.focus();box.placeholder='🔍 Add another medicine';}
+};
 /* Discount is a bill-level rupee amount; GST is a bill-level percentage.
    Recalculate from the live inputs so changing either after adding items updates totals immediately. */
 function billTotals(items=billCart){
@@ -95,7 +128,10 @@ function billTotals(items=billCart){
  const gst=taxable*gstRate/100;
  return {subtotal:sub,discount,gst,gstRate,grandTotal:taxable+gst}
 }
-function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
+function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.length
+ ? '<div class="small" style="margin:8px 0;font-weight:700">Added Medicines ('+billCart.length+') — all items below will be saved in ONE bill.</div>'
+   + billCart.map((x,i)=>'<div class="itemrow"><b>'+(i+1)+'. '+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • Qty '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')
+ : '<div class="small">No medicines added. Select a medicine and tap “+ Add to This Bill”. You can repeat this for 2, 3 or more medicines.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
 window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;renderBilling()};
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
