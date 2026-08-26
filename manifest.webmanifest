@@ -1,1 +1,19 @@
-{"id":"/SKMedKART-Admin/","name":"SKMedKART V5.8 Pro Max","short_name":"SKMedKART","description":"Sri Krishna Medicals Pharmacy Admin Portal","start_url":"/SKMedKART-Admin/","scope":"/SKMedKART-Admin/","display":"standalone","display_override":["standalone","minimal-ui"],"background_color":"#eef3f8","theme_color":"#315c92","orientation":"portrait-primary","icons":[{"src":"/SKMedKART-Admin/icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},{"src":"/SKMedKART-Admin/icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},{"src":"/SKMedKART-Admin/icons/maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},{"src":"/SKMedKART-Admin/icons/maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}]}
+{
+  "id": "./",
+  "name": "SKMedKART V5.8 Pro Max",
+  "short_name": "SKMedKART",
+  "description": "Sri Krishna Medicals Pharmacy Admin Portal",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#eef3f8",
+  "theme_color": "#315c92",
+  "orientation": "portrait-primary",
+  "prefer_related_applications": false,
+  "icons": [
+    {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any"},
+    {"src":"./icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any"},
+    {"src":"./icons/maskable-192.png","sizes":"192x192","type":"image/png","purpose":"maskable"},
+    {"src":"./icons/maskable-512.png","sizes":"512x512","type":"image/png","purpose":"maskable"}
+  ]
+}

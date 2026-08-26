@@ -116,36 +116,23 @@ window.addBillItem=()=>{
   const box=$('bMedicineSearch');
   if(box){box.focus();box.placeholder='🔍 Add another medicine';}
 };
-/* Bill-level discount can be either a flat rupee amount or a percentage. GST is calculated after discount. */
-let billDiscountType='flat';
-window.setDiscountType=(type)=>{
- billDiscountType=type==='percent'?'percent':'flat';
- const flat=$('discountFlatBtn'),percent=$('discountPercentBtn'),label=$('discountInputLabel'),input=$('bDiscount');
- if(flat)flat.classList.toggle('active',billDiscountType==='flat');
- if(percent)percent.classList.toggle('active',billDiscountType==='percent');
- if(label)label.textContent=billDiscountType==='percent'?'Discount (%)':'Discount (₹)';
- if(input)input.placeholder=billDiscountType==='percent'?'0 - 100':'0';
- renderBilling();
-};
+/* Discount is a bill-level rupee amount; GST is a bill-level percentage.
+   Recalculate from the live inputs so changing either after adding items updates totals immediately. */
 function billTotals(items=billCart){
  const sub=items.reduce((sum,x)=>sum+Number(x.qty||0)*Number(x.price||0),0);
  const discInput=$('bDiscount'),gstInput=$('bGst');
  const legacyDiscount=items.reduce((sum,x)=>sum+Number(x.discount||0),0);
- const discountValue=Math.max(0,discInput?Number(discInput.value||0):legacyDiscount);
- const discountType=billDiscountType==='percent'?'percent':'flat';
- const discount=discountType==='percent'
-   ? Math.min(sub,sub*Math.min(100,discountValue)/100)
-   : Math.min(sub,discountValue);
+ const discount=Math.min(sub,Math.max(0,discInput?Number(discInput.value||0):legacyDiscount));
  const gstRate=Math.max(0,gstInput?Number(gstInput.value||0):0);
  const taxable=Math.max(0,sub-discount);
  const gst=taxable*gstRate/100;
- return {subtotal:sub,discount,discountType,discountValue,gst,gstRate,grandTotal:taxable+gst}
+ return {subtotal:sub,discount,gst,gstRate,grandTotal:taxable+gst}
 }
 function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.length
  ? '<div class="small" style="margin:8px 0;font-weight:700">Added Medicines ('+billCart.length+') — all items below will be saved in ONE bill.</div>'
    + billCart.map((x,i)=>'<div class="itemrow"><b>'+(i+1)+'. '+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • Qty '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')
  : '<div class="small">No medicines added. Select a medicine and tap “+ Add to This Bill”. You can repeat this for 2, 3 or more medicines.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
-window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;setDiscountType('flat');renderBilling()};
+window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;renderBilling()};
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
