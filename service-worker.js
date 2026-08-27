@@ -1,4 +1,4 @@
-const CACHE='skmedkart-v58-medicine-check-20260827';
+const CACHE='skmedkart-v59-medicine-check-20260827';
 const BASE='/SKMedKART-Admin/';
 const ASSETS=[
   BASE,
