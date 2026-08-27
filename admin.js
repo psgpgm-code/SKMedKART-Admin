@@ -2,9 +2,9 @@
 // V5.8 all-fixed release: clear obsolete client-only cache keys once.
 // Live Firebase data is not deleted by this code.
 try{
-  if(localStorage.getItem('skmedkart_release')!=='v5.8-all-fixed'){
+  if(localStorage.getItem('skmedkart_release')!=='v5.8-medicine-check'){
     ['bills','orders','products','batches','purchases','customers','reminders','stockMovements','suppliers'].forEach(k=>localStorage.removeItem(k));
-    localStorage.setItem('skmedkart_release','v5.8-all-fixed');
+    localStorage.setItem('skmedkart_release','v5.8-medicine-check');
   }
 }catch(e){}
 
@@ -25,7 +25,27 @@ window.adminLogout=()=>configured?signOut(auth):($('panel').classList.add('hidde
 if(configured)onAuthStateChanged(auth,u=>{if(!u){$('panel').classList.add('hidden');$('bottomNav').classList.add('hidden');$('loginCard').classList.remove('hidden');return}if(admins.length&&!admins.includes(u.email)){alert('This account is not authorized as admin.');return signOut(auth)}showPanel()});
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
-function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderReminders();renderSuppliers();renderSelects()}
+function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderReminders();renderSuppliers();renderSelects()}
+function renderMedicineCheck(){
+ const r=$('mcResult'); if(!r)return;
+ if(!r.dataset.initialized) r.innerHTML='<div class="small">Search any medicine to check availability.</div>';
+ r.dataset.initialized='1';
+}
+window.checkMedicineAvailability=()=>{
+ const input=$('mcSearch'); const result=$('mcResult'); if(!input||!result)return;
+ const q=input.value.trim(); if(!q){result.innerHTML='<div class="warning">Enter a medicine name.</div>';return}
+ const exact=findMedicineBySearch(q);
+ const list=exact?[exact]:medicineMatches(q);
+ if(!list.length){result.innerHTML='<div class="zero"><b>❌ Medicine not found</b><br><span class="small">No matching medicine is in the current stock list.</span></div>';return}
+ result.innerHTML=list.map(p=>{
+   const usable=batches.filter(b=>b.productId===p.id&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED');
+   const qty=usable.reduce((sum,b)=>sum+Number(b.stock||0),0);
+   const near=usable.filter(b=>expiryStatus(b)==='NEAR EXPIRY').length;
+   const status=qty>0?'Available':'Out of Stock';
+   const batchText=usable.length?usable.sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>'<div class="small">Batch '+esc(b.batchNumber||'-')+' • Exp '+esc(b.expiryDate||'-')+' • Stock '+Number(b.stock||0)+'</div>').join(''):'<div class="small">No saleable batch stock available.</div>';
+   return '<div class="'+(qty>0?'good':'zero')+'"><b>'+esc(p.name||'Medicine')+'</b><span class="pill '+(qty>0?'':'bad')+'">'+status+(qty>0?' ✅':' ❌')+'</span><div style="margin-top:8px"><b>Current available stock: '+qty+'</b>'+(near?'<br><span class="small">⚠️ '+near+' batch(es) near expiry</span>':'')+'</div><div style="margin-top:8px">'+batchText+'</div></div>';
+ }).join('');
+};
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
 function renderDashboard(){const low=products.filter(p=>Number(p.stock||0)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>Number(p.stock||0)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const alerts=[...zero.map(p=>'OUT OF STOCK: '+p.name),...low.filter(p=>Number(p.stock)>0).map(p=>'LOW STOCK: '+p.name+' ('+p.stock+')'),...exp.map(b=>expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)];$('alerts').innerHTML=alerts.map(x=>'<div class="warning">'+esc(x)+'</div>').join('')||'<div class="good">No urgent stock or expiry alerts.</div>';$('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
@@ -81,41 +101,9 @@ function syncBillMedicine(){pickBillMedicine(findMedicineBySearch($('bMedicineSe
 function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puProductSearch').value))}
 showMedicineSuggestions('bMedicineSearch','bMedicineSuggest',pickBillMedicine);
 showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedicine);
+showMedicineSuggestions('mcSearch','mcSuggest',p=>{if(p){$('mcSearch').value=p.name;window.checkMedicineAvailability()}});
 window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
-window.addBillItem=()=>{
-  if(!$('bMedicine').value){
-    const typed=findMedicineBySearch($('bMedicineSearch').value);
-    if(typed)pickBillMedicine(typed);
-  }
-  const pid=$('bMedicine').value;
-  const bid=$('bBatch').value;
-  const qty=Math.max(1,Number($('bQty').value)||1);
-  const price=Math.max(0,Number($('bPrice').value)||0);
-  const p=products.find(x=>x.id===pid);
-  const b=batches.find(x=>x.id===bid);
-
-  if(!p)return alert('Please select a medicine first.');
-  if(!b)return alert('Please select the batch for '+p.name+'.');
-  if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');
-
-  const existing=Number(billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0));
-  if(Number(b.stock||0)<existing+qty)return alert('Insufficient batch stock.');
-
-  // Same medicine + same batch: merge quantity instead of creating a duplicate row.
-  const same=billCart.find(x=>x.productId===pid&&x.batchId===bid&&Number(x.price)===price);
-  if(same)same.qty+=qty;
-  else billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price});
-
-  // Keep the current bill/customer, but clear only the medicine entry fields.
-  $('bMedicineSearch').value='';
-  $('bMedicine').value='';
-  $('bBatch').innerHTML='<option value="">Select batch</option>';
-  $('bQty').value=1;
-  $('bPrice').value='';
-  renderBilling();
-  const box=$('bMedicineSearch');
-  if(box){box.focus();box.placeholder='🔍 Add another medicine';}
-};
+window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,qty,price});renderBilling()};
 /* Discount is a bill-level rupee amount; GST is a bill-level percentage.
    Recalculate from the live inputs so changing either after adding items updates totals immediately. */
 function billTotals(items=billCart){
@@ -128,10 +116,7 @@ function billTotals(items=billCart){
  const gst=taxable*gstRate/100;
  return {subtotal:sub,discount,gst,gstRate,grandTotal:taxable+gst}
 }
-function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.length
- ? '<div class="small" style="margin:8px 0;font-weight:700">Added Medicines ('+billCart.length+') — all items below will be saved in ONE bill.</div>'
-   + billCart.map((x,i)=>'<div class="itemrow"><b>'+(i+1)+'. '+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • Qty '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')
- : '<div class="small">No medicines added. Select a medicine and tap “+ Add to This Bill”. You can repeat this for 2, 3 or more medicines.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
+function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
 window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;renderBilling()};
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();

@@ -1,0 +1,1 @@
+V5.8 Pro Max update: Sri Krishna Medicals logo added as PWA app icon. Added Check Medicine Availability page using existing products and batches data only. No Firebase collections or GitHub Actions workflow changes are required. Upload/replace these files in the existing SKMedKART-Admin repository root.
