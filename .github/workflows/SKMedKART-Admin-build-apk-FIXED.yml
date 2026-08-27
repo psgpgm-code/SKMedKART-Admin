@@ -1,0 +1,68 @@
+name: Build SKMedKART Admin APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Build APK
+        shell: bash
+        run: |
+          set -e
+          mkdir -p android/app/src/main/java/com/skmedkart/admin android/app/src/main/res/values android/app/src/main/res/layout
+          cat > android/settings.gradle <<'TXT'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS); repositories { google(); mavenCentral() } }
+          rootProject.name = 'SKMedKARTAdmin'
+          include ':app'
+          TXT
+          cat > android/build.gradle <<'TXT'
+          plugins { id 'com.android.application' version '8.5.2' apply false }
+          TXT
+          cat > android/app/build.gradle <<'TXT'
+          plugins { id 'com.android.application' }
+          android { namespace 'com.skmedkart.admin'; compileSdk 35
+            defaultConfig { applicationId 'com.skmedkart.admin'; minSdk 23; targetSdk 35; versionCode 1; versionName '1.0' }
+          }
+          TXT
+          cat > android/app/src/main/AndroidManifest.xml <<'TXT'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"><uses-permission android:name="android.permission.INTERNET"/><application android:theme="@style/AppTheme" android:label="SKMedKART Admin"><activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity></application></manifest>
+          TXT
+          cat > android/app/src/main/res/values/styles.xml <<'TXT'
+          <resources><style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar"/></resources>
+          TXT
+          cat > android/app/src/main/res/values/strings.xml <<'TXT'
+          <resources><string name="app_name">SKMedKART Admin</string></resources>
+          TXT
+          cat > android/app/src/main/res/layout/activity_main.xml <<'TXT'
+          <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent"><WebView android:id="@+id/webView" android:layout_width="match_parent" android:layout_height="match_parent"/></FrameLayout>
+          TXT
+          cat > android/app/src/main/java/com/skmedkart/admin/MainActivity.java <<'TXT'
+          package com.skmedkart.admin;
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          public class MainActivity extends Activity {
+            WebView w;
+            public void onCreate(Bundle b) { super.onCreate(b); setContentView(R.layout.activity_main); w=findViewById(R.id.webView); w.getSettings().setJavaScriptEnabled(true); w.getSettings().setDomStorageEnabled(true); w.setWebViewClient(new WebViewClient()); w.loadUrl("https://psgpgm-code.github.io/SKMedKART-Admin/"); }
+            public void onBackPressed() { if(w.canGoBack()) w.goBack(); else super.onBackPressed(); }
+          }
+          TXT
+          cd /tmp
+          curl -L -o gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          unzip -q gradle.zip
+          /tmp/gradle-8.7/bin/gradle -p "$GITHUB_WORKSPACE/android" :app:assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SKMedKART-Admin-APK
+          path: android/app/build/outputs/apk/debug/app-debug.apk
