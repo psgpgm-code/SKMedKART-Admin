@@ -1,4 +1,4 @@
-const CACHE='skmedkart-v59-login-open-fixed-20260827';
+const CACHE='skmedkart-v591-firebase-login-hard-fix-20260827';
 const BASE='/SKMedKART-Admin/';
 const ASSETS=[
   BASE,

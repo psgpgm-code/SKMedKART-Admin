@@ -1,0 +1,1 @@
+V5.9.1 fixes the screenshot issue where the app incorrectly entered Demo mode and rejected the real Firebase admin account. Firebase config now has a built-in fallback and the PWA cache version is changed. Existing features/data code are retained. Upload/replace the package files in the existing SKMedKART-Admin repository root.

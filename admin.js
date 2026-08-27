@@ -11,8 +11,13 @@ try{
 import {initializeApp} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
 import {getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
-const K='skm_pharmacy_v2_',cfg=window.SKMED_FIREBASE_CONFIG||{},admins=window.SKMED_ADMIN_EMAILS||[];
-const configured=!!(cfg.projectId&&!String(cfg.projectId).startsWith('PASTE_'));
+const K='skm_pharmacy_v2_';
+// Robust Firebase config fallback: keeps login working even if an old PWA cache serves a stale/missing firebase-config.js.
+const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',authDomain:'skmedkart.firebaseapp.com',projectId:'skmedkart',storageBucket:'skmedkart.firebasestorage.app',messagingSenderId:'921893232974',appId:'1:921893232974:web:e7fab8eae5eaaec6597e1f'};
+const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
+const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
+const admins=window.SKMED_ADMIN_EMAILS||[];
+const configured=!!(cfg.apiKey&&cfg.authDomain&&cfg.projectId);
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='';
 if(configured){const app=initializeApp(cfg);db=getFirestore(app);auth=getAuth(app)}
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
