@@ -26,14 +26,76 @@ const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=
 $('notice').innerHTML=configured?'<b>☁️ Live Firebase mode</b><br><span class="small">Billing, purchases, batches and stock are synchronized.</span>':'<b>📱 Demo mode</b><br><span class="small">Data is stored only in this browser.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
-function showPanel(){clearLoginMessage();$('loginCard').classList.add('hidden');$('panel').classList.remove('hidden');$('bottomNav').classList.remove('hidden');loadAll()}
+function normalizeEmail(v){return String(v||'').trim().toLowerCase()}
+function showPanel(){
+  try{
+    clearLoginMessage();
+    const login=$('loginCard'),panel=$('panel'),nav=$('bottomNav');
+    if(!login||!panel||!nav)throw new Error('Login screen elements are missing.');
+    login.classList.add('hidden');
+    panel.classList.remove('hidden');
+    nav.classList.remove('hidden');
+    // Opening the panel must never depend on Firestore finishing successfully.
+    Promise.resolve(loadAll()).catch(e=>{console.error('Dashboard load error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Dashboard opened, but some Firebase data could not load.</b><br><span class="small">'+esc(e?.message||'Check Firebase rules and internet connection.')+'</span>'});
+  }catch(e){console.error('Open panel error:',e);loginMessage('❌ Login succeeded but the dashboard could not open: '+(e?.message||'Unknown error'),'error');throw e}
+}
 window.togglePasswordVisibility=()=>{const p=$('password'),b=$('togglePassword');if(!p)return;const show=p.type==='password';p.type=show?'text':'password';if(b){b.textContent=show?'🙈':'👁️';b.setAttribute('aria-label',show?'Hide password':'Show password')}};
-function loginErrorMessage(e){const code=String(e?.code||'');if(code==='auth/invalid-credential'||code==='auth/wrong-password'||code==='auth/user-not-found')return '❌ Wrong email or password. Please check and try again.';if(code==='auth/invalid-email')return '❌ Please enter a valid email address.';if(code==='auth/user-disabled')return '❌ This admin account has been disabled.';if(code==='auth/too-many-requests')return '⚠️ Too many failed attempts. Please wait a few minutes and try again.';if(code==='auth/network-request-failed')return '⚠️ Internet connection problem. Please check your network and try again.';return '❌ Login failed. '+(e?.message||'Please check your email and password.')}
+function loginErrorMessage(e){
+  const code=String(e?.code||'');
+  if(code==='auth/invalid-credential'||code==='auth/wrong-password')return '❌ Wrong password. Please check your password and try again.';
+  if(code==='auth/user-not-found')return '❌ This email is not registered.';
+  if(code==='auth/invalid-email')return '❌ Please enter a valid email address.';
+  if(code==='auth/user-disabled')return '❌ This admin account has been disabled.';
+  if(code==='auth/too-many-requests')return '⚠️ Too many failed attempts. Please wait a few minutes and try again.';
+  if(code==='auth/network-request-failed')return '⚠️ Internet connection problem. Please check your network and try again.';
+  if(code==='auth/operation-not-allowed')return '❌ Email/password login is not enabled in Firebase Authentication.';
+  if(code==='auth/unauthorized-domain')return '❌ This website domain is not authorized in Firebase Authentication.';
+  return '❌ Login failed: '+(e?.message||code||'Please check your email and password.')
+}
 let loginOpening=false;
-window.adminLogin=async()=>{const em=$('email').value.trim(),pw=$('password').value,btn=$('loginBtn');clearLoginMessage();if(!em){loginMessage('⚠️ Please enter your admin email.','error');$('email').focus();return}if(!pw){loginMessage('⚠️ Please enter your password.','error');$('password').focus();return}if(!configured){if(em==='admin@skmedkart.local'&&pw==='1234'){loginMessage('✓ Login successful. Opening admin panel...','success');return showPanel()}loginMessage('❌ Wrong email or password. Demo login: admin@skmedkart.local / 1234','error');return}try{loginOpening=true;if(btn){btn.disabled=true;btn.textContent='Logging in...'}loginMessage('Checking your login details...','info');const credential=await signInWithEmailAndPassword(auth,em,pw);const user=credential?.user;if(admins.length&&(!user||!admins.includes(user.email))){loginOpening=false;await signOut(auth);loginMessage('❌ This account is not authorized as admin.','error');return}loginMessage('✓ Login successful. Opening admin panel...','success');showPanel()}catch(e){console.error('Login error:',e);loginMessage(loginErrorMessage(e),'error')}finally{loginOpening=false;if(btn){btn.disabled=false;btn.textContent='Login'}}};
-window.adminLogout=()=>configured?signOut(auth):($('panel').classList.add('hidden'),$('bottomNav').classList.add('hidden'),$('loginCard').classList.remove('hidden'));
-if(configured)onAuthStateChanged(auth,u=>{if(!u){if(loginOpening)return;$('panel').classList.add('hidden');$('bottomNav').classList.add('hidden');$('loginCard').classList.remove('hidden');return}if(admins.length&&!admins.includes(u.email)){loginMessage('❌ This account is not authorized as admin.','error');return signOut(auth)}if($('panel').classList.contains('hidden'))showPanel()});
-['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter')adminLogin()}));
+window.adminLogin=async()=>{
+  const em=normalizeEmail($('email')?.value),pw=$('password')?.value||'',btn=$('loginBtn');
+  clearLoginMessage();
+  if(!em){loginMessage('⚠️ Please enter your admin email.','error');$('email')?.focus();return}
+  if(!pw){loginMessage('⚠️ Please enter your password.','error');$('password')?.focus();return}
+  if(!configured){
+    if(em==='admin@skmedkart.local'&&pw==='1234'){loginMessage('✓ Login successful. Opening admin panel...','success');showPanel();return}
+    loginMessage('❌ Wrong email or password. Demo login: admin@skmedkart.local / 1234','error');return
+  }
+  if(loginOpening)return;
+  try{
+    loginOpening=true;
+    if(btn){btn.disabled=true;btn.textContent='Logging in...'}
+    loginMessage('Checking your login details...','info');
+    const credential=await signInWithEmailAndPassword(auth,em,pw);
+    const user=credential?.user;
+    if(!user)throw new Error('Firebase did not return a signed-in user.');
+    const allowed=admins.map(normalizeEmail);
+    if(allowed.length&&!allowed.includes(normalizeEmail(user.email))){
+      await signOut(auth);
+      loginMessage('❌ This account is not authorized as admin.','error');return
+    }
+    // Do not wait for auth-state or Firestore callbacks. Open the dashboard now.
+    showPanel();
+  }catch(e){
+    console.error('Login error:',e);
+    loginMessage(loginErrorMessage(e),'error');
+  }finally{
+    loginOpening=false;
+    if(btn){btn.disabled=false;btn.textContent='Login'}
+  }
+};
+window.adminLogout=()=>{
+  const close=()=>{$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden')};
+  if(configured)signOut(auth).catch(e=>console.error('Logout error:',e)).finally(close);else close();
+};
+if(configured)onAuthStateChanged(auth,u=>{
+  if(!u){if(loginOpening)return;$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden');return}
+  const allowed=admins.map(normalizeEmail);
+  if(allowed.length&&!allowed.includes(normalizeEmail(u.email))){loginMessage('❌ This account is not authorized as admin.','error');return signOut(auth)}
+  if($('panel')?.classList.contains('hidden'))showPanel();
+});
+['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderReminders();renderSuppliers();renderSelects()}
