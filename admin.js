@@ -207,160 +207,13 @@ window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bM
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
-window.saveBill=async()=>{
-  if(!billCart.length)return alert('Add at least one item.');
-  const totals=billTotals();
-  const customerName=$('bCustomer').value.trim()||'Walk-in Customer';
-  const mobile=$('bMobile').value.trim();
-  const doctor=$('bDoctor').value.trim();
-  const paymentMode=$('bPayment').value;
-  const note=$('bNote').value.trim();
-  const invoiceNumber='SKM-'+today().replaceAll('-','')+'-'+String(Date.now()).slice(-6)+'-'+uid().slice(-3).toUpperCase();
-  const items=billCart.map(x=>({...x}));
-  const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};
-  const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
-  const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
-  try{
-    if(configured){
-      /*
-       * IMPORTANT BILL-SAVE FIX:
-       * The bill itself and the inventory changes are kept in one transaction.
-       * Optional records (customers, stockMovements, online-order status) are
-       * written AFTER the bill transaction. A permission problem in any of
-       * those optional collections must NEVER make the actual bill fail.
-       */
-      if(useReservedStock){
-        const billRef=doc(collection(db,'bills'));
-        await runTransaction(db,async tx=>{
-          const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);
-          if(!os.exists())throw Error('Order not found.');
-          const live=os.data();
-          if(live.stockRestored)throw Error('This order stock was restored after cancellation.');
-          tx.set(billRef,{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});
-        });
-        bill.id=billRef.id;
-      }else{
-        const batchIds=[...new Set(items.map(x=>x.batchId))];
-        const productIds=[...new Set(items.map(x=>x.productId))];
-        const billRef=doc(collection(db,'bills'));
-        await runTransaction(db,async tx=>{
-          const batchRefs=batchIds.map(id=>doc(db,'batches',id));
-          const productRefs=productIds.map(id=>doc(db,'products',id));
-          const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));
-          const batchMap=new Map(),prodMap=new Map();
-          batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));
-          productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));
-          const batchQty=new Map(),prodQty=new Map();
-          for(const it of items){
-            batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);
-            prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty);
-          }
-          for(const [id,qty] of batchQty){
-            const s=batchMap.get(id);
-            if(!s?.exists())throw Error('Batch not found.');
-            const d=s.data();
-            if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);
-            if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber);
-          }
-          for(const [id,qty] of prodQty){
-            const s=prodMap.get(id);
-            if(!s?.exists())throw Error('Product not found.');
-            if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.');
-          }
-          for(const [id,qty] of batchQty){
-            const s=batchMap.get(id);
-            tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()});
-          }
-          for(const [id,qty] of prodQty){
-            const s=prodMap.get(id);
-            tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()});
-          }
-          tx.set(billRef,{...bill,createdAt:serverTimestamp()});
-        });
-        bill.id=billRef.id;
-
-        /* Stock movement is audit-only; never block a successful bill. */
-        try{
-          for(const it of items){
-            await addDoc(collection(db,'stockMovements'),{
-              type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,
-              qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()
-            });
-          }
-        }catch(stockMoveErr){
-          console.warn('Bill saved, but stock movement audit write failed:',stockMoveErr?.message||stockMoveErr);
-        }
-      }
-
-      /* Customer record is optional and must not block bill saving. */
-      if(mobile){
-        try{
-          await setDoc(doc(db,'customers',mobile),{
-            name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),
-            lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()
-          },{merge:true});
-        }catch(customerErr){
-          console.warn('Bill saved, but customer record update failed:',customerErr?.message||customerErr);
-        }
-      }
-
-      /* Online-order status is optional after the bill is safely saved. */
-      if(sourceOrderId){
-        try{
-          await updateDoc(doc(db,'orders',sourceOrderId),{
-            status:'Billed',billed:true,billNumber:invoiceNumber,
-            billedAt:serverTimestamp(),updatedAt:serverTimestamp(),
-            stockConsumed:useReservedStock
-          });
-        }catch(orderErr){
-          console.warn('Bill saved, but order status update failed:',orderErr?.message||orderErr);
-        }
-      }
-    }else{
-      for(const it of items){
-        const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);
-        if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');
-        b.stock-=it.qty;p.stock-=it.qty;
-      }
-      bill.id='B'+Date.now();
-      bills.unshift(bill);
-      set('bills',bills);set('batches',batches);set('products',products);
-      const sm=get('stockMovements',[]);
-      sm.push(...items.map(it=>({
-        id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,
-        batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()
-      })));
-      set('stockMovements',sm);
-      if(mobile){
-        customers=customers.filter(c=>c.mobile!==mobile);
-        customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});
-        set('customers',customers);
-      }
-      if(sourceOrderId){
-        const o=currentOrders.find(x=>x.id===sourceOrderId);
-        if(o){
-          o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;
-          o.billedAt=new Date().toISOString();set('orders',currentOrders);
-        }
-      }
-    }
-
-    alert('Bill saved: '+invoiceNumber);
-    billCart=[];sourceOrderId='';
-    ['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');
-    renderAll();
-    window.showBillActions?.(bill);
-  }catch(e){
-    console.error('SAVE BILL ERROR:',e);
-    alert('Could not save bill: '+(e?.message||e));
-  }
-};
+window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
 function shopHeaderHtml(){
 return '<div style="text-align:center;border:1px solid #333;padding:12px;margin-bottom:14px"><div style="font-size:22px;font-weight:700">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</div><div>Phone: 8300363317</div><div>Drug Licence No: TN/DPI/01386/20,21<br>FSSAI Licence No: 22422039000512</div></div>'
 }
 function billHtml(b){return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title><style>body{font-family:Arial;padding:20px;max-width:760px;margin:auto;color:#222}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:7px;text-align:left}.r{text-align:right}.totals{margin-top:14px;border-top:1px solid #333;padding-top:8px}.grand{font-size:20px;font-weight:700}</style></head><body>'+shopHeaderHtml()+'<h3 style="text-align:center;margin:8px 0">Invoice '+esc(b.invoiceNumber)+'</h3><p><b>Date:</b> '+esc(b.billDate)+'<br><b>Customer:</b> '+esc(b.customerName)+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed By:</b> '+esc(b.doctor||'-')+'</p><table><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>'+b.items.map(i=>'<tr><td>'+esc(i.name)+'</td><td>'+esc(i.batchNumber)+'</td><td>'+i.qty+'</td><td>'+money(i.price)+'</td><td>'+money(i.qty*i.price)+'</td></tr>').join('')+'</table><div class="totals">Subtotal: '+money(b.subtotal)+'<br>Discount: '+money(b.discount)+'<br>GST: '+money(b.gst)+'<br><span class="grand">Grand Total: '+money(b.grandTotal)+'</span></div><p><b>Payment:</b> '+esc(b.paymentMode)+'<br><b>Note:</b> '+esc(b.note||'-')+'</p></body></html>'}
 function findBill(id){return bills.find(b=>b.id===id||b.invoiceNumber===id)}
-window.printBill=id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return;const w=window.open('','_blank');if(!w)return alert('Popup blocked. Allow popups and try again.');w.document.open();w.document.write(billHtml(b));w.document.close();w.focus();setTimeout(()=>w.print(),250)};
+window.printBill=id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return alert('Bill not found.');const html=billHtml(b);let frame=document.getElementById('printFrame');if(frame)frame.remove();frame=document.createElement('iframe');frame.id='printFrame';frame.style.position='fixed';frame.style.width='1px';frame.style.height='1px';frame.style.border='0';frame.style.opacity='0';document.body.appendChild(frame);const docx=frame.contentDocument||frame.contentWindow.document;docx.open();docx.write(html);docx.close();frame.onload=()=>{setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){const w=window.open('','_blank');if(!w)return alert('Please allow popups for printing.');w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300)}},150)};setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){}},700)};
 function pdfEscape(s){return String(s??'').replace(/\\/g,'\\\\').replace(/[()]/g,'\\$&').replace(/[^\x20-\x7E]/g,'?')}
 function pdfBlob(b){const lines=['Sri Krishna Medicals','Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu','Phone: 8300363317','Drug Licence No: TN/DPI/01386/20,21','FSSAI Licence No: 22422039000512','','Invoice: '+b.invoiceNumber,'Date: '+b.billDate,'Customer: '+b.customerName,'Mobile: '+(b.mobile||'-'),'Prescribed By: '+(b.doctor||'-'),'','MEDICINE / BATCH / QTY / AMOUNT',...b.items.map(i=>i.name+' / '+i.batchNumber+' / '+i.qty+' / '+money(i.qty*i.price)),'','Subtotal: '+money(b.subtotal),'Discount: '+money(b.discount),'GST: '+money(b.gst),'Grand Total: '+money(b.grandTotal),'Payment: '+b.paymentMode];const text=['BT','/F1 10 Tf','50 800 Td',...lines.flatMap((l,i)=>[i?'0 -16 Td':'', '('+pdfEscape(l)+') Tj']).filter(Boolean),'ET'].join('\n');const objs=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>','<< /Length '+text.length+' >>\nstream\n'+text+'\nendstream'];let pdf='%PDF-1.4\n',offset=[0];objs.forEach((o,i)=>{offset.push(pdf.length);pdf+=(i+1)+' 0 obj\n'+o+'\nendobj\n'});const x=pdf.length;pdf+='xref\n0 '+(objs.length+1)+'\n0000000000 65535 f \n'+offset.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+'trailer\n<< /Size '+(objs.length+1)+' /Root 1 0 R >>\nstartxref\n'+x+'\n%%EOF';return new Blob([pdf],{type:'application/pdf'})}
 window.saveBillPdf=id=>{const b=findBill(id);if(!b)return;const blob=pdfBlob(b),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=b.invoiceNumber+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
@@ -411,32 +264,42 @@ async function restoreData(data){
 }
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});
 
-window.savePurchase=async()=>{
- const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
- let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
- const qty=Math.max(1,Number($('puQty').value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
- if(!typedName||!batchNumber||!expiryDate||!qty)return alert('Complete Medicine Name, Batch No., Expiry Date and Purchase Qty.');
- const productId=product?.id||('product_'+uid());
- const purchase={productId,productName:product?.name||typedName,qty,batchNumber,expiryDate,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:Number($('puCost').value)||0,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0)};
- try{
-  if(configured){
-   const bid=productId+'__'+batchNumber,br=doc(db,'batches',bid),pr=doc(db,'products',productId);
-   await runTransaction(db,async tx=>{const [bs,ps]=await Promise.all([tx.get(br),tx.get(pr)]);const existingProduct=ps.exists()?ps.data():{};const old=bs.exists()?bs.data():{};
-    tx.set(br,{...old,id:bid,productId,productName:purchase.productName,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
-    tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:Number(existingProduct.lowStockLevel??10),active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
-    tx.set(doc(collection(db,'purchases')),{...purchase,createdAt:serverTimestamp()});
-    tx.set(doc(collection(db,'stockMovements')),{type:'PURCHASE',productId,batchId:bid,batchNumber,qty,reference:invoice||'PURCHASE',createdAt:serverTimestamp()});
-   });
-  }else{
-   if(!product){product={id:productId,name:typedName,price:purchase.sellingPrice,stock:0,lowStockLevel:10,active:true};products.push(product)}
-   let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
-   product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;purchases.unshift({...purchase,id:'PU'+Date.now()});
-   const sm=get('stockMovements',[]);sm.push({id:'SM'+Date.now(),type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',createdAt:new Date().toISOString()});set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases)
-  }
-  alert('Purchase saved and stock increased.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puMrp','puSell'].forEach(id=>$(id).value='');renderAll()
- }catch(e){alert('Could not save purchase: '+e.message)}
+window.calculatePurchaseGst=()=>{
+  const base=Math.max(0,Number($('puCost')?.value)||0);
+  const rate=Math.max(0,Number($('puGst')?.value)||0);
+  const total=base+(base*rate/100);
+  if($('puCostWithGst'))$('puCostWithGst').value=total.toFixed(2);
+  return {base,rate,total};
 };
-function renderPurchases(){$('purchases').innerHTML=purchases.slice(0,30).map(p=>'<div class="itemrow"><b>'+esc(p.productName||p.medicine||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class="small">'+esc(p.supplier||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+'</span></div>').join('')||'<div class="small">No purchases yet.</div>'}
+['puCost','puGst'].forEach(id=>$(id)?.addEventListener('input',window.calculatePurchaseGst));
+window.savePurchase=async()=>{
+  const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
+  let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
+  const qty=Math.max(1,Number($('puQty').value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
+  const gst=window.calculatePurchaseGst();
+  if(!typedName||!batchNumber||!expiryDate||!qty)return alert('Complete Medicine Name, Batch No., Expiry Date and Purchase Qty.');
+  const productId=product?.id||('product_'+uid());
+  const purchase={productId,productName:product?.name||typedName,qty,batchNumber,expiryDate,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0)};
+  try{
+   if(configured){
+    const bid=productId+'__'+batchNumber,br=doc(db,'batches',bid),pr=doc(db,'products',productId);
+    await runTransaction(db,async tx=>{const [bs,ps]=await Promise.all([tx.get(br),tx.get(pr)]);const existingProduct=ps.exists()?ps.data():{};const old=bs.exists()?bs.data():{};
+     tx.set(br,{...old,id:bid,productId,productName:purchase.productName,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
+     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:Number(existingProduct.lowStockLevel??10),purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
+     tx.set(doc(collection(db,'purchases')),{...purchase,createdAt:serverTimestamp()});
+     tx.set(doc(collection(db,'stockMovements')),{type:'PURCHASE',productId,batchId:bid,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:serverTimestamp()});
+    });
+   }else{
+    if(!product){product={id:productId,name:typedName,price:purchase.sellingPrice,stock:0,lowStockLevel:10,active:true};products.push(product)}
+    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});purchases.unshift({...purchase,id:'PU'+Date.now()});
+    const sm=get('stockMovements',[]);sm.push({id:'SM'+Date.now(),type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases)
+   }
+   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell'].forEach(id=>$(id).value='');renderAll()
+  }catch(e){alert('Could not save purchase: '+e.message)}
+};
+
+function renderPurchases(){const q=String($('purchaseSearch')?.value||'').trim().toLowerCase();const rows=purchases.filter(p=>!q||[p.productName,p.supplier,p.invoice,p.batchNumber,p.expiryDate].join(' ').toLowerCase().includes(q)).slice(0,100);$('purchases').innerHTML=rows.map(p=>'<div class="itemrow"><b>'+esc(p.productName||p.medicine||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class="small">'+esc(p.supplier||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span></div>').join('')||'<div class="small">No purchases found.</div>'}
 function renderBatches(){$('batchList').innerHTML=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{const st=expiryStatus(b);return '<div class=\"itemrow\"><b>'+esc(b.productName||b.productId)+'</b><span class=\"pill '+(st==='OK'?'':'bad')+'\">'+st+'</span><br><span class=\"small\">Batch '+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+' • MRP '+money(b.mrp)+' • Sell '+money(b.sellingPrice)+'</span><br><button class=\"danger\" style=\"margin-top:8px;width:auto\" onclick=\"deleteBatch(\''+esc(b.id)+'\')\">🗑️ Delete This Batch</button></div>'}).join('')||'<div class=\"small\">No batches yet. Add stock through Purchase or Opening Stock.</div>'}
 
 window.deleteBatch=async (id)=>{const b=batches.find(x=>x.id===id);if(!b)return alert('Batch not found.');if(!confirm('Delete batch '+(b.batchNumber||'')+' for '+(b.productName||'this medicine')+'? This cannot be undone. Current stock '+Number(b.stock||0)+' will be removed from inventory.'))return;try{if(configured){await runTransaction(db,async tx=>{const br=doc(db,'batches',id),pr=doc(db,'products',b.productId),bs=await tx.get(br),ps=await tx.get(pr);if(!bs.exists())throw Error('Batch not found.');const live=bs.data();if(ps.exists()){const next=Math.max(0,Number(ps.data().stock||0)-Number(live.stock||0));tx.update(pr,{stock:next,updatedAt:serverTimestamp()});}tx.delete(br);tx.set(doc(collection(db,'stockMovements')),{type:'BATCH_DELETE',productId:live.productId||b.productId,batchId:id,batchNumber:live.batchNumber||b.batchNumber,qty:-Number(live.stock||0),reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:serverTimestamp()});});}else{const qty=Number(b.stock||0),prod=products.find(x=>x.id===b.productId);if(prod)prod.stock=Math.max(0,Number(prod.stock||0)-qty);batches=batches.filter(x=>x.id!==id);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push({id:'DEL'+Date.now(),type:'BATCH_DELETE',productId:b.productId,batchId:id,batchNumber:b.batchNumber,qty:-qty,reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Batch deleted successfully. Product stock has been recalculated.');renderAll()}catch(e){alert('Could not delete batch: '+e.message)}};
@@ -564,7 +427,18 @@ window.updateOrder=async id=>{
 };
 window.saveProduct=async()=>{const name=$('pname').value.trim(),price=Number($('pprice').value)||0,stock=Number($('pstock').value)||0,lowStockLevel=Math.max(0,Number($('pLow').value)||10),openingBatch=$('pBatch').value.trim(),openingExpiry=$('pExpiry').value;if(!name)return alert('Enter product name.');if(stock>0&&(!openingBatch||!openingExpiry))return alert('For opening stock, enter opening batch number and expiry date so billing stock remains batch-wise correct.');const barcode=$('pBarcode')?.value.trim()||'',purchasePrice=Number($('pPurchase')?.value)||0,mrp=Number($('pMrp')?.value)||0,gst=Number($('pGst')?.value)||0,supplier=$('pSupplier')?.value.trim()||'';const id=String(name).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,100)||'product_'+Date.now(),p={name,cat:$('pcat').value,price,stock,lowStockLevel,barcode,purchasePrice,mrp,gst,supplier,icon:$('picon').value.trim()||'💊',rx:$('prx').checked,active:true};try{if(configured){await runTransaction(db,async tx=>{const pr=doc(db,'products',id),ps=await tx.get(pr);if(stock>0){const br=doc(db,'batches',id+'__'+openingBatch),bs=await tx.get(br);tx.set(br,{...(bs.exists()?bs.data():{}),id:id+'__'+openingBatch,productId:id,productName:name,batchNumber:openingBatch,expiryDate:openingExpiry,stock:Number(bs.exists()?bs.data().stock||0:0)+stock,mrp:mrp||price,purchasePrice,sellingPrice:price,gst,updatedAt:serverTimestamp(),createdAt:serverTimestamp()},{merge:true})}tx.set(pr,{...p,stock:Number(ps.exists()?ps.data().stock||0:0)+stock,updatedAt:serverTimestamp(),createdAt:ps.exists()?ps.data().createdAt||serverTimestamp():serverTimestamp()},{merge:true})})}else{p.id=id;const i=products.findIndex(x=>x.id===id);if(i>=0){products[i].stock=Number(products[i].stock||0)+stock;Object.assign(products[i],p)}else products.push(p);if(stock>0){const bid=id+'__'+openingBatch,b=batches.find(x=>x.id===bid);if(b)b.stock+=stock;else batches.push({id:bid,productId:id,productName:name,batchNumber:openingBatch,expiryDate:openingExpiry,stock,mrp:price,sellingPrice:price})}set('products',products);set('batches',batches)}alert('Product saved.');['pname','pBarcode','pprice','pPurchase','pMrp','pGst','pstock','pBatch','pExpiry','pSupplier','picon'].forEach(id=>$(id).value='');$('pLow').value=10;$('prx').checked=false;renderAll()}catch(e){alert(e.message)}};
 window.deleteProduct=async id=>{const p=products.find(x=>x.id===id);if(!p)return alert('Product not found.');const related=batches.filter(b=>b.productId===id);if(!confirm('Delete '+(p.name||'this product')+' and its '+related.length+' batch(es)? This is only for a mistaken product upload and cannot be undone.'))return;try{if(configured){const wb=writeBatch(db);related.forEach(b=>wb.delete(doc(db,'batches',b.id)));wb.delete(doc(db,'products',id));await wb.commit();await addDoc(collection(db,'stockMovements'),{type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:serverTimestamp()});}else{products=products.filter(x=>x.id!==id);batches=batches.filter(b=>b.productId!==id);set('products',products);set('batches',batches);const sm=get('stockMovements',[]);sm.push({id:'PDEL'+Date.now(),type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Product and its related batches deleted successfully.');renderAll()}catch(e){alert('Could not delete product: '+e.message)}};
-function renderStock(){const zero=products.filter(p=>Number(p.stock||0)<=0),low=products.filter(p=>Number(p.stock||0)>0&&Number(p.stock||0)<=Number(p.lowStockLevel??10));$('stockSummary').innerHTML='<div class="grid"><div class="zero"><b>Out of stock: '+zero.length+'</b></div><div class="warning"><b>Low stock: '+low.length+'</b></div></div>';$('stockList').innerHTML=products.map(p=>{const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+'</span><br><button class="danger" style="margin-top:8px;width:auto" onclick="deleteProduct(\''+esc(p.id)+'\')">🗑️ Delete Product</button></div>'}).join('')||'<div class="small">No products added yet.</div>'}
+window.setStockFilter=(filter)=>{const box=$('stockSummary');if(!box)return;box.dataset.filter=['all','out','expiry'].includes(filter)?filter:'all';renderStock()};
+window.filterStockSearch=(value)=>{const box=$('stockSummary');if(!box)return;box.dataset.search=String(value||'');renderStock()};
+function renderStock(){
+ const box=$('stockSummary'),list=$('stockList');if(!box||!list)return;
+ const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();
+ const zero=products.filter(p=>Number(p.stock||0)<=0);
+ const expiredProducts=products.filter(p=>batches.some(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED'));
+ const matchesSearch=p=>{if(!search)return true;const productText=[p.name,p.barcode,p.cat].join(' ').toLowerCase();const batchText=batches.filter(b=>b.productId===p.id).map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ').toLowerCase();return (productText+' '+batchText).includes(search)};
+ let shown=products.filter(matchesSearch);if(filter==='out')shown=shown.filter(p=>Number(p.stock||0)<=0);if(filter==='expiry')shown=shown.filter(p=>expiredProducts.some(x=>x.id===p.id));
+ box.innerHTML='<div class="grid"><button class="secondary" type="button" onclick="setStockFilter(\'out\')">🔴 Out of stock: '+zero.length+'</button><button class="secondary" type="button" onclick="setStockFilter(\'expiry\')">⏰ Expired stock: '+expiredProducts.length+'</button></div><div class="stockFilterRow"><input id="stockSearch" value="'+esc(box.dataset.search||'')+'" oninput="filterStockSearch(this.value)" placeholder="🔍 Search medicine / barcode / batch"><button class="secondary smallBtn" type="button" onclick="setStockFilter(\'all\');$(\'stockSummary\').dataset.search=\'\';renderStock()">↩ All</button></div><div class="small" style="margin-top:8px">Showing '+shown.length+' of '+products.length+' products</div>';
+ list.innerHTML=shown.map(p=>{const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';const exp=batches.filter(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED');const expText=exp.length?' • '+exp.length+' expired batch(es)':'';return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button class="danger" style="margin-top:8px;width:auto" onclick="deleteProduct(\''+esc(p.id)+'\')">🗑️ Delete Product</button></div>'}).join('')||'<div class="small">No products match this filter.</div>';
+}
 function renderReports(){const sales=bills.filter(b=>!b.returned).reduce((s,b)=>s+Number(b.grandTotal||0),0),purchaseCost=purchases.reduce((s,p)=>s+Number(p.qty||0)*Number(p.purchasePrice||0),0),gross=sales-purchaseCost;$('reportCards').innerHTML='<div class="stat">Total Sales<br>'+money(sales)+'</div><div class="stat">Purchase Value<br>'+money(purchaseCost)+'</div><div class="stat">Gross Margin<br>'+money(gross)+'</div><div class="stat">Bills<br>'+bills.length+'</div>';$('reportRows').innerHTML=bills.slice(0,100).map(b=>'<tr><td>'+esc(b.invoiceNumber)+'</td><td>'+esc(b.customerName)+'</td><td>'+esc(b.billDate||'')+'</td><td>'+money(b.grandTotal)+'</td><td>'+esc(b.paymentMode)+'</td><td><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">Print</button> <button onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">PDF</button> <button onclick="shareBill(\''+esc(b.id||b.invoiceNumber)+'\')">Share</button></td></tr>').join('')}
 function reminderDateOf(r){return r.nextDate||r.reminderDate||'';}
 function reminderStatus(r){const ds=reminderDateOf(r);if(!ds)return 'No date';const due=new Date(ds+'T00:00:00');const now=new Date();now.setHours(0,0,0,0);const diff=Math.round((due-now)/86400000);if(diff<0)return 'Overdue '+Math.abs(diff)+' day(s)';if(diff===0)return 'Due today';if(diff===1)return 'Due tomorrow';return 'Due in '+diff+' days';}
@@ -572,3 +446,15 @@ window.saveReminder=async()=>{const customerName=$('rCustomer').value.trim(),mob
 window.completeReminder=async id=>{const r=reminders.find(x=>x.id===id);if(!r)return;const repeat=Math.max(1,Number(r.repeatDays)||30);const base=reminderDateOf(r)||today();const d=new Date(base+'T00:00:00');d.setDate(d.getDate()+repeat);const nextDate=d.toISOString().slice(0,10);try{if(configured)await updateDoc(doc(db,'reminders',id),{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:serverTimestamp(),updatedAt:serverTimestamp()});else{Object.assign(r,{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:new Date().toISOString()});set('reminders',reminders)}renderAll();alert('Done. Next reminder: '+nextDate)}catch(e){alert(e.message)}};
 window.deleteReminder=async id=>{if(!confirm('Delete this customer reminder?'))return;try{if(configured)await deleteDoc(doc(db,'reminders',id));else{reminders=reminders.filter(x=>x.id!==id);set('reminders',reminders)}renderAll()}catch(e){alert(e.message)}};
 function renderReminders(){const list=$('reminderList');if(!list)return;const now=new Date();now.setHours(0,0,0,0);const rs=reminders.slice().sort((x,y)=>String(reminderDateOf(x)).localeCompare(String(reminderDateOf(y))));const due=rs.filter(r=>{const ds=reminderDateOf(r);return ds&&new Date(ds+'T00:00:00')<=new Date(now.getTime()+7*86400000)});const count=$('reminderDueCount');if(count)count.textContent=due.length?('Due: '+due.length):'';list.innerHTML=rs.map(r=>{const ds=reminderDateOf(r),phone=String(r.mobile||'').replace(/\D/g,''),wa=phone.length===10?'91'+phone:phone,msg=encodeURIComponent('Hello '+(r.customerName||'')+', this is Sri Krishna Medicals, Pennagaram. Reminder for '+(r.medicine||'medicine')+'.');const diff=ds?Math.round((new Date(ds+'T00:00:00')-now)/86400000):99,cls=diff<0?'overdueReminder':diff<=7?'dueReminder':'';return '<div class="itemrow '+cls+'"><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(ds)+' • '+esc(reminderStatus(r))+' • Every '+Math.max(1,Number(r.repeatDays)||30)+' days • '+esc(r.mode||'Monthly Medicine')+'<br>'+esc(r.mobile||'')+(r.note?'<br>📝 '+esc(r.note):'')+'</span><div class="reminderActions"><button class="ok" onclick="completeReminder(\''+esc(r.id)+'\')">✓ Done / Next</button>'+(wa?'<a class="link" target="_blank" href="https://wa.me/'+esc(wa)+'?text='+msg+'">WhatsApp</a>':'')+'<button class="danger" onclick="deleteReminder(\''+esc(r.id)+'\')">Delete</button></div></div>'}).join('')||'<div class="small">No customer reminders yet.</div>';}
+
+// UI bridge for the matching V5.9 HTML. These handlers keep every visible button connected.
+window.show=(id)=>{document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===id));$(id)?.classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});if(id==='stock')renderStock();if(id==='purchase')renderPurchases();if(id==='billing')renderBilling();if(id==='history')renderBillHistory();};
+window.openBillHistory=()=>window.show('history');
+window.openReminderManager=()=>window.show('reminders');
+window.openCustomerHistory=()=>{const m=$('bMobile')?.value.trim();const list=customers.filter(c=>!m||String(c.mobile||'')===m);alert(list.length?list.map(c=>c.name+' • '+c.mobile+' • Last bill: '+(c.lastBillNumber||'-')).join('\n'):'No customer history found.');};
+window.setPayment=(mode)=>{if($('bPayment'))$('bPayment').value=mode;document.querySelectorAll('.payBtn').forEach(b=>b.classList.toggle('active',b.dataset.pay===mode));};
+window.scanBarcode=()=>alert('Barcode scanner is not available in this browser build. Use the medicine search field to find the product.');
+window.searchMedicine=()=>{};
+window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
+window.openBillViewFromButton=id=>window.viewBill(id);
+window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();});
