@@ -413,8 +413,42 @@ async function restoreCancelledOrderStock(id,o,updatedNote){
  return {restored:true};
 }
 window.cancelOrder=async id=>{
- const o=currentOrders.find(x=>x.id===id);if(!o)return alert('Order not found.');if(o.status==='Billed')return alert('This order has already been billed. Use bill history / return bill instead of cancelling the order.');if(o.status==='Cancelled')return alert(o.stockRestored?'Order already cancelled. Stock was already restored.':'Order is already cancelled.');if(!confirm('Cancel this customer order? Reserved online-order stock will be automatically returned.'))return;
- try{const note=(o.pharmacistNote||'').trim(),updatedNote=(note?note+'\n':'')+'Order cancelled by admin.';const result=await restoreCancelledOrderStock(id,o,updatedNote);if(result.restored)alert('Order cancelled successfully. Stock has been automatically restored.');else if(configured){await updateDoc(doc(db,'orders',id),{status:'Cancelled',pharmacistNote:updatedNote,cancelledAt:serverTimestamp(),updatedAt:serverTimestamp(),stockRestoreStatus:'No stock reservation was found, so no restock was needed'});alert('Order cancelled successfully. This order had no reserved stock to restore.');}else{Object.assign(o,{status:'Cancelled',pharmacistNote:updatedNote,cancelledAt:new Date().toISOString(),stockRestoreStatus:'No stock reservation was found, so no restock was needed'});set('orders',currentOrders);renderOrders();alert('Order cancelled successfully. This order had no reserved stock to restore.');}}catch(e){if(e.message==='STOCK_ALREADY_RESTORED')alert('Order was already restored. Stock was not added twice.');else alert('Could not cancel order: '+e.message)}};
+  const o=currentOrders.find(x=>x.id===id);
+  if(!o)return alert('Order not found.');
+  if(o.status==='Billed')return alert('This order has already been billed. Use bill history / return bill instead of cancelling the order.');
+  if(o.status==='Cancelled')return alert('Order is already cancelled.');
+  if(!confirm('Cancel this customer order? Reserved stock will be automatically restored to inventory.'))return;
+  try{
+    const note=(o.pharmacistNote||'').trim();
+    const updatedNote=(note?note+'\n':'')+'Order cancelled by admin.';
+    const result=await restoreCancelledOrderStock(id,o,updatedNote);
+    if(result.restored){
+      alert('Order cancelled successfully. Stock has been automatically restored.');
+    }else if(configured){
+      await updateDoc(doc(db,'orders',id),{
+        status:'Cancelled',
+        pharmacistNote:updatedNote,
+        cancelledAt:serverTimestamp(),
+        updatedAt:serverTimestamp(),
+        stockRestoreStatus:'No stock reservation was found, so no restock was needed'
+      });
+      alert('Order cancelled successfully. This order had no reserved stock to restore.');
+    }else{
+      Object.assign(o,{
+        status:'Cancelled',
+        pharmacistNote:updatedNote,
+        cancelledAt:new Date().toISOString(),
+        stockRestoreStatus:'No stock reservation was found, so no restock was needed'
+      });
+      set('orders',currentOrders);
+      renderOrders();
+      alert('Order cancelled successfully. This order had no reserved stock to restore.');
+    }
+  }catch(e){
+    if(e.message==='STOCK_ALREADY_RESTORED')alert('Order was already restored. Stock was not added twice.');
+    else alert('Could not cancel order: '+e.message);
+  }
+};
 window.updateOrder=async id=>{
  const existing=currentOrders.find(x=>x.id===id);if(existing&&existing.status==='Cancelled')return alert('Cancelled order cannot be changed or billed.');const st=$('st_'+id).value,note=$('note_'+id).value.trim();if(st==='Cancelled'){if(note)existing.pharmacistNote=note;return window.cancelOrder(id)}
  try{
