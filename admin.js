@@ -1,4 +1,4 @@
-// V5.9.5: based on the last working V5.9.3 build. Only requested search/focus stability is changed.
+// V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
 // V5.8 all-fixed release: clear obsolete client-only cache keys once.
 // Live Firebase data is not deleted by this code.
