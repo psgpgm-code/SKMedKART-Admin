@@ -465,8 +465,34 @@ window.deleteProduct=async id=>{const p=products.find(x=>x.id===id);if(!p)return
 window.setStockFilter=(filter)=>{const box=$('stockSummary');if(!box)return;box.dataset.filter=['all','out','expiry'].includes(filter)?filter:'all';renderStock();};
 window.filterStockSearch=(value)=>{const box=$('stockSummary');if(!box)return;box.dataset.search=String(value||'');renderStockListOnly();};
 function getFilteredStock(){const box=$('stockSummary');if(!box)return products;const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();const expiredProducts=products.filter(p=>batches.some(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED'));const matches=p=>{if(!search)return true;const pt=[p.name,p.barcode,p.cat].join(' ').toLowerCase();const bt=batches.filter(b=>b.productId===p.id).map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ').toLowerCase();return (pt+' '+bt).includes(search)};let shown=products.filter(matches);if(filter==='out')shown=shown.filter(p=>Number(p.stock||0)<=0);if(filter==='expiry')shown=shown.filter(p=>expiredProducts.some(x=>x.id===p.id));return shown;}
-function renderStockListOnly(){const shown=getFilteredStock(),list=$('stockList');if(!list)return;list.innerHTML=shown.map(p=>{const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';const exp=batches.filter(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED');const expText=exp.length?' • '+exp.length+' expired batch(es)':'';return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button class="danger" style="margin-top:8px;width:auto" onclick="deleteProduct(\''+esc(p.id)+'\')">🗑️ Delete Product</button></div>';}).join('')||'<div class="small">No products added yet.</div>';const c=$('stockShowing');if(c)c.textContent='Showing '+shown.length+' of '+products.length+' products';}
-function renderStock(){const zero=products.filter(p=>Number(p.stock||0)<=0),low=products.filter(p=>Number(p.stock||0)>0&&Number(p.stock||0)<=Number(p.lowStockLevel??10));$('stockSummary').innerHTML='<div class="grid"><div class="zero"><b>Out of stock: '+zero.length+'</b></div><div class="warning"><b>Low stock: '+low.length+'</b></div></div>';$('stockList').innerHTML=products.map(p=>{const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+'</span><br><button class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'">🗑️ Delete Product</button></div>'}).join('')||'<div class="small">No products added yet.</div>';document.querySelectorAll('[data-delete-product]').forEach(btn=>btn.addEventListener('click',()=>window.deleteProduct(btn.getAttribute('data-delete-product'))))}
+function renderStockListOnly(){
+ const shown=getFilteredStock(),list=$('stockList');
+ if(!list)return;
+ list.innerHTML=shown.map(p=>{
+   const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';
+   const exp=batches.filter(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED');
+   const expText=exp.length?' • '+exp.length+' expired batch(es)':'';
+   return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'">🗑️ Delete Product</button></div>';
+ }).join('')||'<div class="small">No matching stock found.</div>';
+ list.onclick=e=>{const btn=e.target.closest('[data-delete-product]');if(btn)window.deleteProduct(btn.getAttribute('data-delete-product'));};
+ const c=$('stockShowing');if(c)c.textContent='Showing '+shown.length+' of '+products.length+' products';
+}
+function renderStock(){
+ const box=$('stockSummary');
+ if(!box)return;
+ const filter=box.dataset.filter||'all';
+ const search=String(box.dataset.search||'').trim().toLowerCase();
+ const zero=products.filter(p=>Number(p.stock||0)<=0);
+ const low=products.filter(p=>Number(p.stock||0)>0&&Number(p.stock||0)<=Number(p.lowStockLevel??10));
+ const expiryProducts=products.filter(p=>batches.some(b=>b.productId===p.id&&['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b))));
+ box.innerHTML='<div class="grid">'+
+   '<button class="'+(filter==='out'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'out\')">🔴 Out of stock: '+zero.length+'</button>'+ 
+   '<button class="'+(filter==='expiry'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'expiry\')">📅 Expiry stock: '+expiryProducts.length+'</button>'+ 
+   '</div>'+ 
+   '<div style="display:flex;gap:8px;margin-top:10px"><input id="stockSearch" value="'+esc(box.dataset.search||'')+'" oninput="filterStockSearch(this.value)" placeholder="🔍 Search medicine / barcode / batch" style="margin:0;flex:1"><button class="secondary" type="button" style="width:auto;white-space:nowrap" onclick="setStockFilter(\'all\');$(\'stockSummary\').dataset.search=\'\';renderStock()">↩ All</button></div>'+ 
+   '<div class="small" style="margin-top:8px" id="stockShowing">Showing 0 of '+products.length+' products</div>';
+ renderStockListOnly();
+}
 function renderReports(){const sales=bills.filter(b=>!b.returned).reduce((s,b)=>s+Number(b.grandTotal||0),0),purchaseCost=purchases.reduce((s,p)=>s+Number(p.qty||0)*Number(p.purchasePrice||0),0),gross=sales-purchaseCost;$('reportCards').innerHTML='<div class="stat">Total Sales<br>'+money(sales)+'</div><div class="stat">Purchase Value<br>'+money(purchaseCost)+'</div><div class="stat">Gross Margin<br>'+money(gross)+'</div><div class="stat">Bills<br>'+bills.length+'</div>';$('reportRows').innerHTML=bills.slice(0,100).map(b=>'<tr><td>'+esc(b.invoiceNumber)+'</td><td>'+esc(b.customerName)+'</td><td>'+esc(b.billDate||'')+'</td><td>'+money(b.grandTotal)+'</td><td>'+esc(b.paymentMode)+'</td><td><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">Print</button> <button onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">PDF</button> <button onclick="shareBill(\''+esc(b.id||b.invoiceNumber)+'\')">Share</button></td></tr>').join('')}
 function reminderDateOf(r){return r.nextDate||r.reminderDate||'';}
 function reminderStatus(r){const ds=reminderDateOf(r);if(!ds)return 'No date';const due=new Date(ds+'T00:00:00');const now=new Date();now.setHours(0,0,0,0);const diff=Math.round((due-now)/86400000);if(diff<0)return 'Overdue '+Math.abs(diff)+' day(s)';if(diff===0)return 'Due today';if(diff===1)return 'Due tomorrow';return 'Due in '+diff+' days';}
