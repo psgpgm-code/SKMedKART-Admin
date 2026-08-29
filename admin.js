@@ -9,9 +9,10 @@ try{
   }
 }catch(e){}
 
+import {initializeApp} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
+import {getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import {getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 const K='skm_pharmacy_v2_';
-let initializeApp,getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut,getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc;
-let firebaseReadyPromise=null;
 // Robust Firebase config fallback: keeps login working even if an old PWA cache serves a stale/missing firebase-config.js.
 const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',authDomain:'skmedkart.firebaseapp.com',projectId:'skmedkart',storageBucket:'skmedkart.firebasestorage.app',messagingSenderId:'921893232974',appId:'1:921893232974:web:e7fab8eae5eaaec6597e1f'};
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
@@ -19,33 +20,7 @@ const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).st
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=!!(cfg.apiKey&&cfg.authDomain&&cfg.projectId);
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
-async function ensureFirebase(){
-  if(!configured)return false;
-  if(db&&auth)return true;
-  if(!firebaseReadyPromise){
-    firebaseReadyPromise=(async()=>{
-      const [appMod,authMod,fsMod]=await Promise.all([
-        import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
-        import('https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js'),
-        import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js')
-      ]);
-      initializeApp=appMod.initializeApp;
-      ({getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut}=authMod);
-      ({getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc}=fsMod);
-      const app=initializeApp(cfg);db=getFirestore(app);auth=getAuth(app);
-      onAuthStateChanged(auth,u=>{
-        if(!u){if(loginOpening)return;$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden');return}
-        const allowed=admins.map(normalizeEmail);
-        if(allowed.length&&!allowed.includes(normalizeEmail(u.email))){loginMessage('❌ This account is not authorized as admin.','error');return signOut(auth)}
-        if($('panel')?.classList.contains('hidden'))showPanel();
-      });
-      return true;
-    })().catch(e=>{firebaseReadyPromise=null;throw e});
-  }
-  return firebaseReadyPromise;
-}
-
-
+if(configured){const app=initializeApp(cfg);db=getFirestore(app);auth=getAuth(app)}
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
@@ -92,8 +67,6 @@ window.adminLogin=async()=>{
   try{
     loginOpening=true;
     if(btn){btn.disabled=true;btn.textContent='Logging in...'}
-    loginMessage('Connecting to Firebase...','info');
-    await ensureFirebase();
     loginMessage('Checking your login details...','info');
     const credential=await signInWithEmailAndPassword(auth,em,pw);
     const user=credential?.user;
@@ -117,6 +90,12 @@ window.adminLogout=()=>{
   const close=()=>{$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden')};
   if(configured)signOut(auth).catch(e=>console.error('Logout error:',e)).finally(close);else close();
 };
+if(configured)onAuthStateChanged(auth,u=>{
+  if(!u){if(loginOpening)return;$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden');return}
+  const allowed=admins.map(normalizeEmail);
+  if(allowed.length&&!allowed.includes(normalizeEmail(u.email))){loginMessage('❌ This account is not authorized as admin.','error');return signOut(auth)}
+  if($('panel')?.classList.contains('hidden'))showPanel();
+});
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
@@ -236,14 +215,54 @@ return '<div style="text-align:center;border:1px solid #333;padding:12px;margin-
 }
 function billHtml(b){return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title><style>body{font-family:Arial;padding:20px;max-width:760px;margin:auto;color:#222}table{width:100%;border-collapse:collapse}th,td{border:1px solid #333;padding:7px;text-align:left}.r{text-align:right}.totals{margin-top:14px;border-top:1px solid #333;padding-top:8px}.grand{font-size:20px;font-weight:700}</style></head><body>'+shopHeaderHtml()+'<h3 style="text-align:center;margin:8px 0">Invoice '+esc(b.invoiceNumber)+'</h3><p><b>Date:</b> '+esc(b.billDate)+'<br><b>Customer:</b> '+esc(b.customerName)+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed By:</b> '+esc(b.doctor||'-')+'</p><table><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr>'+b.items.map(i=>'<tr><td>'+esc(i.name)+'</td><td>'+esc(i.batchNumber)+'</td><td>'+i.qty+'</td><td>'+money(i.price)+'</td><td>'+money(i.qty*i.price)+'</td></tr>').join('')+'</table><div class="totals">Subtotal: '+money(b.subtotal)+'<br>Discount: '+money(b.discount)+'<br>GST: '+money(b.gst)+'<br><span class="grand">Grand Total: '+money(b.grandTotal)+'</span></div><p><b>Payment:</b> '+esc(b.paymentMode)+'<br><b>Note:</b> '+esc(b.note||'-')+'</p></body></html>'}
 function findBill(id){return bills.find(b=>b.id===id||b.invoiceNumber===id)}
-window.printBill=id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return alert('Bill not found.');const html=billHtml(b);let frame=document.getElementById('printFrame');if(frame)frame.remove();frame=document.createElement('iframe');frame.id='printFrame';frame.style.position='fixed';frame.style.width='1px';frame.style.height='1px';frame.style.border='0';frame.style.opacity='0';document.body.appendChild(frame);const docx=frame.contentDocument||frame.contentWindow.document;docx.open();docx.write(html);docx.close();frame.onload=()=>{setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){const w=window.open('','_blank');if(!w)return alert('Please allow popups for printing.');w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300)}},150)};setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){}},700)};
+window.printBill=id=>{
+ const b=typeof id==='object'?id:findBill(id);
+ if(!b)return alert('Bill not found.');
+ const html=billHtml(b);
+ let area=document.getElementById('pwaPrintArea');
+ if(!area){area=document.createElement('div');area.id='pwaPrintArea';document.body.appendChild(area)}
+ area.innerHTML=html;
+ let style=document.getElementById('pwaPrintStyle');
+ if(!style){style=document.createElement('style');style.id='pwaPrintStyle';style.textContent='@media print{body>*:not(#pwaPrintArea){display:none!important}#pwaPrintArea{display:block!important;position:static!important;width:auto!important;margin:0!important;padding:0!important;background:#fff!important;color:#000!important}#pwaPrintArea *{visibility:visible!important}}@media screen{#pwaPrintArea{display:none!important}}';document.head.appendChild(style)}
+ const cleanup=()=>{setTimeout(()=>{area.innerHTML='';},500)};
+ try{window.focus();window.print();cleanup()}catch(e){
+   const w=window.open('','_blank');
+   if(!w)return alert('Printing is not available in this installed app. Please use Share or Save PDF.');
+   w.document.open();w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300);
+ }
+};
+
 function pdfEscape(s){return String(s??'').replace(/\\/g,'\\\\').replace(/[()]/g,'\\$&').replace(/[^\x20-\x7E]/g,'?')}
 function pdfBlob(b){const lines=['Sri Krishna Medicals','Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu','Phone: 8300363317','Drug Licence No: TN/DPI/01386/20,21','FSSAI Licence No: 22422039000512','','Invoice: '+b.invoiceNumber,'Date: '+b.billDate,'Customer: '+b.customerName,'Mobile: '+(b.mobile||'-'),'Prescribed By: '+(b.doctor||'-'),'','MEDICINE / BATCH / QTY / AMOUNT',...b.items.map(i=>i.name+' / '+i.batchNumber+' / '+i.qty+' / '+money(i.qty*i.price)),'','Subtotal: '+money(b.subtotal),'Discount: '+money(b.discount),'GST: '+money(b.gst),'Grand Total: '+money(b.grandTotal),'Payment: '+b.paymentMode];const text=['BT','/F1 10 Tf','50 800 Td',...lines.flatMap((l,i)=>[i?'0 -16 Td':'', '('+pdfEscape(l)+') Tj']).filter(Boolean),'ET'].join('\n');const objs=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>','<< /Length '+text.length+' >>\nstream\n'+text+'\nendstream'];let pdf='%PDF-1.4\n',offset=[0];objs.forEach((o,i)=>{offset.push(pdf.length);pdf+=(i+1)+' 0 obj\n'+o+'\nendobj\n'});const x=pdf.length;pdf+='xref\n0 '+(objs.length+1)+'\n0000000000 65535 f \n'+offset.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+'trailer\n<< /Size '+(objs.length+1)+' /Root 1 0 R >>\nstartxref\n'+x+'\n%%EOF';return new Blob([pdf],{type:'application/pdf'})}
-window.saveBillPdf=id=>{const b=findBill(id);if(!b)return;const blob=pdfBlob(b),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=b.invoiceNumber+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
-window.shareBill=async id=>{const b=findBill(id);if(!b)return;const text='Sri Krishna Medicals, Pennagaram\nInvoice: '+b.invoiceNumber+'\nCustomer: '+b.customerName+'\nTotal: '+money(b.grandTotal)+'\nPayment: '+b.paymentMode;if(navigator.share){try{const file=new File([pdfBlob(b)],b.invoiceNumber+'.pdf',{type:'application/pdf'});if(navigator.canShare?.({files:[file]}))await navigator.share({title:'Medical Bill '+b.invoiceNumber,text,files:[file]});else await navigator.share({title:'Medical Bill '+b.invoiceNumber,text});return}catch(e){if(e.name==='AbortError')return}}navigator.clipboard?.writeText(text);alert('Bill details copied. You can paste and send to the customer. Use Save PDF to attach the invoice.')};
+window.saveBillPdf=id=>{
+ const b=typeof id==='object'?id:findBill(id);
+ if(!b)return alert('Bill not found.');
+ const blob=pdfBlob(b),url=URL.createObjectURL(blob);
+ const a=document.createElement('a');a.href=url;a.download=(b.invoiceNumber||'SKMedKART-Bill')+'.pdf';a.rel='noopener';document.body.appendChild(a);
+ try{a.click()}catch(e){window.open(url,'_blank','noopener')}
+ setTimeout(()=>{a.remove();URL.revokeObjectURL(url)},3000);
+};
 
-function billViewHtml(b){const returned=b.returned?'<div class="returnInfo">↩ This bill was returned on '+esc(b.returnedAtText||b.returnedAt||b.billDate||'')+'. Stock has been restored.</div>':'';const shop='<div class="card shopBillHeader" style="padding:14px;margin:10px 0;text-align:center"><b style="font-size:20px">Sri Krishna Medicals</b><br><span>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</span><br><span>📞 8300363317</span><br><span><b>Drug Licence No:</b> TN/DPI/01386/20,21</span><br><span><b>FSSAI Licence No:</b> 22422039000512</span></div>';return '<h2>📄 Invoice '+esc(b.invoiceNumber)+'</h2>'+returned+'<p class="small">'+esc(b.billDate||'')+' • '+esc(b.paymentMode||'')+'</p>'+shop+'<div class="card" style="padding:14px;margin:10px 0"><b>Customer:</b> '+esc(b.customerName||'Walk-in Customer')+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed by:</b> '+esc(b.doctor||'-')+'</div><table class="viewBillTable"><thead><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>'+((b.items||[]).map(i=>'<tr><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td>'+Number(i.qty||0)+'</td><td>'+money(i.price)+'</td><td>'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join(''))+'</tbody></table><div class="modalTotals"><div class="totalLine"><span>Subtotal</span><b>'+money(b.subtotal)+'</b></div><div class="totalLine"><span>Discount</span><b>-'+money(b.discount)+'</b></div><div class="totalLine"><span>GST</span><b>'+money(b.gst)+'</b></div><div class="totalLine grand"><span>Grand Total</span><span>'+money(b.grandTotal)+'</span></div></div><div class="modalActions"><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">🖨 Print</button><button class="secondary" onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">📄 Save PDF</button><button class="ok" onclick="shareBill(\''+esc(b.id||b.invoiceNumber)+'\')">📤 Share</button>'+(!b.returned?'<button class="danger" onclick="returnBill(\''+esc(b.id||b.invoiceNumber)+'\')">↩ Return Bill</button>':'<button class="danger" onclick="deleteBillRecord(\''+esc(b.id||b.invoiceNumber)+'\')">🗑 Delete Record</button>')+'</div>'}
-window.viewBill=id=>{const b=findBill(id);if(!b)return alert('Bill not found.');$('billModalContent').innerHTML=billViewHtml(b);const shareBtn=$('billModalContent')?.querySelector('[data-share-bill]');if(shareBtn)shareBtn.onclick=()=>window.shareBill(b.id||b.invoiceNumber);$('billModal').classList.remove('hidden')};window.closeBillView=()=>$('billModal').classList.add('hidden');$('billModal')?.addEventListener('click',e=>{if(e.target===$('billModal'))closeBillView()});
+window.shareBill=async id=>{
+ const b=typeof id==='object'?id:findBill(id);
+ if(!b)return alert('Bill not found.');
+ const text='Sri Krishna Medicals, Pennagaram\nInvoice: '+b.invoiceNumber+'\nCustomer: '+(b.customerName||'Walk-in Customer')+'\nTotal: '+money(b.grandTotal)+'\nPayment: '+(b.paymentMode||'Cash');
+ try{
+   const blob=pdfBlob(b),file=new File([blob],(b.invoiceNumber||'SKMedKART-Bill')+'.pdf',{type:'application/pdf'});
+   if(navigator.share){
+     if(navigator.canShare?.({files:[file]})){await navigator.share({title:'Medical Bill '+b.invoiceNumber,text,files:[file]});return}
+     await navigator.share({title:'Medical Bill '+b.invoiceNumber,text});return
+   }
+ }catch(e){if(e?.name==='AbortError')return;console.warn('Web Share failed:',e)}
+ try{if(navigator.clipboard?.writeText)await navigator.clipboard.writeText(text)}catch(e){}
+ const wa='https://wa.me/?text='+encodeURIComponent(text);
+ const w=window.open(wa,'_blank','noopener');
+ if(!w)location.href=wa;
+};
+
+
+function billViewHtml(b){const returned=b.returned?'<div class="returnInfo">↩ This bill was returned on '+esc(b.returnedAtText||b.returnedAt||b.billDate||'')+'. Stock has been restored.</div>':'';const shop='<div class="card shopBillHeader" style="padding:14px;margin:10px 0;text-align:center"><b style="font-size:20px">Sri Krishna Medicals</b><br><span>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</span><br><span>📞 8300363317</span><br><span><b>Drug Licence No:</b> TN/DPI/01386/20,21</span><br><span><b>FSSAI Licence No:</b> 22422039000512</span></div>';return '<h2>📄 Invoice '+esc(b.invoiceNumber)+'</h2>'+returned+'<p class="small">'+esc(b.billDate||'')+' • '+esc(b.paymentMode||'')+'</p>'+shop+'<div class="card" style="padding:14px;margin:10px 0"><b>Customer:</b> '+esc(b.customerName||'Walk-in Customer')+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed by:</b> '+esc(b.doctor||'-')+'</div><table class="viewBillTable"><thead><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>'+((b.items||[]).map(i=>'<tr><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td>'+Number(i.qty||0)+'</td><td>'+money(i.price)+'</td><td>'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join(''))+'</tbody></table><div class="modalTotals"><div class="totalLine"><span>Subtotal</span><b>'+money(b.subtotal)+'</b></div><div class="totalLine"><span>Discount</span><b>-'+money(b.discount)+'</b></div><div class="totalLine"><span>GST</span><b>'+money(b.gst)+'</b></div><div class="totalLine grand"><span>Grand Total</span><span>'+money(b.grandTotal)+'</span></div></div><div class="modalActions"><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">🖨 Print</button><button class="secondary" onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">📄 Save PDF</button>'+(!b.returned?'<button class="danger" onclick="returnBill(\''+esc(b.id||b.invoiceNumber)+'\')">↩ Return Bill</button>':'<button class="danger" onclick="deleteBillRecord(\''+esc(b.id||b.invoiceNumber)+'\')">🗑 Delete Record</button>')+'</div>'}
+window.viewBill=id=>{const b=findBill(id);if(!b)return alert('Bill not found.');$('billModalContent').innerHTML=billViewHtml(b);$('billModal').classList.remove('hidden')};window.closeBillView=()=>$('billModal').classList.add('hidden');$('billModal')?.addEventListener('click',e=>{if(e.target===$('billModal'))closeBillView()});
 window.renderBillHistory=()=>{const el=$('billHistoryList');if(!el)return;const q=String($('billHistorySearch')?.value||'').trim().toLowerCase();const rows=bills.filter(b=>!q||[b.invoiceNumber,b.customerName,b.mobile].join(' ').toLowerCase().includes(q));el.innerHTML=rows.map(b=>{const id=esc(b.id||b.invoiceNumber);return '<div class="billHistoryRow"><div class="billHistoryTop"><div><b style="font-size:20px">'+esc(b.invoiceNumber)+'</b><div class="small">'+esc(b.billDate||'')+' • '+esc(b.customerName||'Walk-in Customer')+'</div>'+ (b.returned?'<span class="returnedBadge">↩ Returned</span>':'')+'</div><div class="amount">'+money(b.grandTotal)+'</div></div><div class="actions"><button onclick="viewBill(\''+id+'\')">👁 View</button><button class="secondary" onclick="printBill(\''+id+'\')">🖨 Print</button>'+(!b.returned?'<button class="danger" onclick="returnBill(\''+id+'\')">↩ Return</button>':'<button class="danger" onclick="deleteBillRecord(\''+id+'\')">🗑 Delete Record</button>')+'</div></div>'}).join('')||'<div class="small">No bills found.</div>'};
 window.returnBill=async id=>{const b=findBill(id);if(!b)return alert('Bill not found.');if(b.returned)return alert('This bill has already been returned.');if(!confirm('Return bill '+b.invoiceNumber+'? This will restore all item quantities back to stock.'))return;try{if(configured){await runTransaction(db,async tx=>{const refs=[];for(const it of b.items||[]){refs.push(doc(db,'batches',it.batchId));refs.push(doc(db,'products',it.productId))}const uniq=[...new Map(refs.map(r=>[r.path,r])).values()];const snaps=await Promise.all(uniq.map(r=>tx.get(r)));const map=new Map(uniq.map((r,i)=>[r.path,snaps[i]]));for(const it of b.items||[]){const br=doc(db,'batches',it.batchId),pr=doc(db,'products',it.productId),bs=map.get(br.path),ps=map.get(pr.path);if(!bs?.exists()||!ps?.exists())throw Error('Original product or batch not found for '+(it.name||it.batchNumber));tx.update(br,{stock:Number(bs.data().stock||0)+Number(it.qty||0),updatedAt:serverTimestamp()});tx.update(pr,{stock:Number(ps.data().stock||0)+Number(it.qty||0),updatedAt:serverTimestamp()});tx.set(doc(collection(db,'stockMovements')),{type:'RETURN',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:Number(it.qty||0),reference:b.invoiceNumber,createdAt:serverTimestamp()})}tx.update(doc(db,'bills',b.id),{returned:true,returnedAt:serverTimestamp(),returnedAtText:new Date().toLocaleString('en-IN'),returnReason:'Bill return - stock restored'})})}else{for(const it of b.items||[]){const batch=batches.find(x=>x.id===it.batchId),prod=products.find(x=>x.id===it.productId);if(!batch||!prod)throw Error('Original product or batch not found for '+(it.name||it.batchNumber));batch.stock=Number(batch.stock||0)+Number(it.qty||0);prod.stock=Number(prod.stock||0)+Number(it.qty||0)}b.returned=true;b.returnedAt=new Date().toISOString();b.returnedAtText=new Date().toLocaleString('en-IN');b.returnReason='Bill return - stock restored';set('batches',batches);set('products',products);set('bills',bills);const sm=get('stockMovements',[]);for(const it of b.items||[])sm.push({id:'RT'+Date.now()+Math.random(),type:'RETURN',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:Number(it.qty||0),reference:b.invoiceNumber,createdAt:new Date().toISOString()});set('stockMovements',sm)}alert('Bill returned successfully. Stock has been restored.');closeBillView();renderAll()}catch(e){alert('Return failed: '+e.message)}};
 
@@ -495,10 +514,21 @@ function renderStockListOnly(){
    const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';
    const exp=batches.filter(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED');
    const expText=exp.length?' • '+exp.length+' expired batch(es)':'';
-   return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'" onclick="window.deleteProduct(this.getAttribute(&#39;data-delete-product&#39;))">🗑️ Delete Product</button></div>';
+   return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'">🗑️ Delete Product</button></div>';
  }).join('')||'<div class="small">No matching stock found.</div>';
- // Direct button handler above is used for reliable standalone/PWA clicks.
+ list.onclick=e=>{const btn=e.target.closest('[data-delete-product]');if(btn)window.deleteProduct(btn.getAttribute('data-delete-product'));};
  const c=$('stockShowing');if(c)c.textContent='Showing '+shown.length+' of '+products.length+' products';
+}
+// PWA-safe product delete delegation: works in Chrome and installed standalone mode.
+if(!window.__skmDeleteDelegation){
+ window.__skmDeleteDelegation=true;
+ document.addEventListener('click',e=>{
+   const btn=e.target.closest?.('[data-delete-product]');
+   if(!btn)return;
+   e.preventDefault();e.stopPropagation();
+   const id=btn.getAttribute('data-delete-product');
+   if(id)window.deleteProduct(id);
+ },true);
 }
 function renderStock(){
  const box=$('stockSummary');
@@ -534,4 +564,4 @@ window.scanBarcode=()=>alert('Barcode scanner is not available in this browser b
 window.searchMedicine=()=>{};
 window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
 window.openBillViewFromButton=id=>window.viewBill(id);
-window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
+window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();});
