@@ -170,6 +170,7 @@ function pickBillMedicine(p){
 function pickPurchaseMedicine(p){
  $('puProduct').value=p?p.id:'';
  if($('puProductSearch'))$('puProductSearch').dataset.productFound=p?'yes':'no';
+ if(p&&$('puCategory'))$('puCategory').value=p.cat||'Human Medicines';
 }
 function syncBillMedicine(){pickBillMedicine(findMedicineBySearch($('bMedicineSearch').value))}
 function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puProductSearch').value))}
@@ -278,25 +279,26 @@ window.savePurchase=async()=>{
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
   const qty=Math.max(1,Number($('puQty').value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
   const gst=window.calculatePurchaseGst();
+  const category=$('puCategory')?.value||product?.cat||'Human Medicines';
   if(!typedName||!batchNumber||!expiryDate||!qty)return alert('Complete Medicine Name, Batch No., Expiry Date and Purchase Qty.');
   const productId=product?.id||('product_'+uid());
-  const purchase={productId,productName:product?.name||typedName,qty,batchNumber,expiryDate,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0)};
+  const purchase={productId,productName:product?.name||typedName,category,cat:category,qty,batchNumber,expiryDate,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0)};
   try{
    if(configured){
     const bid=productId+'__'+batchNumber,br=doc(db,'batches',bid),pr=doc(db,'products',productId);
     await runTransaction(db,async tx=>{const [bs,ps]=await Promise.all([tx.get(br),tx.get(pr)]);const existingProduct=ps.exists()?ps.data():{};const old=bs.exists()?bs.data():{};
-     tx.set(br,{...old,id:bid,productId,productName:purchase.productName,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
-     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:Number(existingProduct.lowStockLevel??10),purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
+     tx.set(br,{...old,id:bid,productId,productName:purchase.productName,category:purchase.category,cat:purchase.category,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
+     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:Number(existingProduct.lowStockLevel??10),purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
      tx.set(doc(collection(db,'purchases')),{...purchase,createdAt:serverTimestamp()});
      tx.set(doc(collection(db,'stockMovements')),{type:'PURCHASE',productId,batchId:bid,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:serverTimestamp()});
     });
    }else{
-    if(!product){product={id:productId,name:typedName,price:purchase.sellingPrice,stock:0,lowStockLevel:10,active:true};products.push(product)}
-    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,price:purchase.sellingPrice,stock:0,lowStockLevel:10,active:true};products.push(product)}else{product.cat=purchase.category;product.category=purchase.category;}
+    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.cat=purchase.category;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
     product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});purchases.unshift({...purchase,id:'PU'+Date.now()});
     const sm=get('stockMovements',[]);sm.push({id:'SM'+Date.now(),type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases)
    }
-   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell'].forEach(id=>$(id).value='');renderAll()
+   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell'].forEach(id=>$(id).value='');if($('puCategory'))$('puCategory').value='Human Medicines';renderAll()
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
 
