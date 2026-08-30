@@ -31,8 +31,26 @@
 </main>
 <nav id="bottomNav" class="hidden"><button class="tab active" data-view="home"><span class="navicon">🏠</span>Home</button><button class="tab" data-view="orders"><span class="navicon">📦</span>Orders</button><button class="tab" data-view="billing"><span class="navicon">🧾</span>Billing</button><button class="tab" data-view="reports"><span class="navicon">📊</span>Reports</button><button class="tab" data-view="stock"><span class="navicon">💊</span>Stock</button><button class="tab" data-view="settings"><span class="navicon">⚙️</span>Settings</button></nav>
 <div id="billModal" class="modal hidden"><div><button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><div id="billModalContent"></div></div></div>
-<script type="module" src="admin.js?v=5.9.18"></script>
 <script>
-let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.getElementById('installAppBtn').style.display='block'});document.getElementById('installAppBtn').addEventListener('click',async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;document.getElementById('installAppBtn').style.display='none'});if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js?v=5.9.18',{updateViaCache:'none'}).then(r=>r.update()).catch(()=>{}));
+(async()=>{
+  // PWA hard refresh guard: remove stale service workers/caches before loading app code.
+  try{
+    if('serviceWorker' in navigator){
+      const regs=await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r=>r.unregister().catch(()=>false)));
+    }
+    if(window.caches){
+      const keys=await caches.keys();
+      await Promise.all(keys.filter(k=>/^skmedkart-admin-/i.test(k)).map(k=>caches.delete(k)));
+    }
+  }catch(e){console.warn('PWA cache cleanup:',e)}
+  const s=document.createElement('script');
+  s.type='module';
+  s.src='admin.js?v=5.9.19';
+  document.body.appendChild(s);
+})();
+</script>
+<script>
+let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.getElementById('installAppBtn').style.display='block'});document.getElementById('installAppBtn').addEventListener('click',async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;document.getElementById('installAppBtn').style.display='none'});if('serviceWorker' in navigator){window.addEventListener('load',()=>setTimeout(()=>navigator.serviceWorker.register('sw.js?v=5.9.19',{updateViaCache:'none'}).then(r=>r.update()).catch(()=>{}),1500));}
 </script>
 </body></html>
