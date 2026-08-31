@@ -140,11 +140,94 @@ function disableOnlineOrderFeatures(){
       const b=document.createElement('button'); b.className='tab'; b.dataset.view='reminders'; b.innerHTML='<span class="navicon">🔔</span>Reminders'; nav.appendChild(b);
     }
     nav.style.gridTemplateColumns='repeat('+nav.querySelectorAll('.tab').length+',1fr)';
+    arrangeFinalNavigation();
     // Keep the existing four offline tabs and add only History + Reminders.
     nav.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view)?.classList.remove('hidden');if(b.dataset.view==='history')renderBillHistory();if(b.dataset.view==='reminders')renderReminders();});
     // Ensure the two requested buttons are visible at the bottom even if an older CSS/build hid them.
     ['history','reminders'].forEach(v=>{const b=nav.querySelector('[data-view="'+v+'"]');if(b)b.style.display='block'});
   }
+}
+
+/* FINAL UI polish: visual sizing, navigation order, PDF sharing, monthly bill archive. */
+(function applyFinalUiPolish(){
+  const style=document.createElement('style');
+  style.id='skm-final-ui-polish';
+  style.textContent=`
+    #panel{font-size:15px}
+    #panel h1{font-size:28px!important}
+    #panel h2{font-size:24px!important}
+    #panel h3{font-size:21px!important}
+    #panel h4{font-size:18px!important}
+    #panel .stat{font-size:30px!important}
+    #panel .small{font-size:13px!important}
+    #panel button,#panel input,#panel select,#panel textarea{font-size:14px}
+    #bottomNav{grid-template-columns:repeat(7,1fr)!important}
+    #bottomNav .tab{font-size:11px!important;padding:7px 2px!important;line-height:1.15}
+    #bottomNav .navicon{font-size:20px!important;display:block;margin-bottom:2px}
+    #history .monthlyArchiveBox{margin-top:10px;padding:12px;border:1px solid #d9e2ec;border-radius:14px;background:#f7fafc}
+    #history .monthlyArchiveBox .archiveRow{display:flex;gap:8px;align-items:center}
+    #history .monthlyArchiveBox input{margin:0;flex:1}
+    #history .monthlyArchiveBox button{margin:0;white-space:nowrap}
+    @media(max-width:430px){
+      #panel .stat{font-size:26px!important}
+      #bottomNav .tab{font-size:10px!important}
+      #bottomNav .navicon{font-size:18px!important}
+      #history .monthlyArchiveBox .archiveRow{flex-direction:column;align-items:stretch}
+    }
+  `;
+  document.head.appendChild(style);
+})();
+function arrangeFinalNavigation(){
+  const nav=$('bottomNav'); if(!nav)return;
+  const order=['home','billing','reports','stock','history','reminders','settings'];
+  order.forEach(v=>{const b=nav.querySelector('[data-view="'+v+'"]');if(b)nav.appendChild(b)});
+  nav.style.gridTemplateColumns='repeat('+nav.querySelectorAll('.tab').length+',1fr)';
+  nav.querySelectorAll('.tab').forEach(b=>b.style.display=b.dataset.view==='orders'?'none':'block');
+}
+function addMonthlyArchiveControl(){
+  const section=$('history'); if(!section||section.querySelector('.monthlyArchiveBox'))return;
+  const box=document.createElement('div');
+  box.className='monthlyArchiveBox';
+  box.innerHTML='<b>📁 Monthly Bill Copy</b><div class="small" style="margin:4px 0 9px">Download all bills for one month as one PDF file.</div><div class="archiveRow"><input id="billArchiveMonth" type="month"><button class="secondary" type="button" onclick="downloadMonthlyBillsPdf()">⬇️ Download Monthly PDF</button></div>';
+  const search=$('billHistorySearch');
+  if(search)search.insertAdjacentElement('afterend',box);else section.querySelector('.section')?.appendChild(box);
+  const m=$('billArchiveMonth');if(m)m.value=today().slice(0,7);
+}
+window.downloadMonthlyBillsPdf=()=>{
+  const month=String($('billArchiveMonth')?.value||today().slice(0,7));
+  const rows=bills.filter(b=>String(b.billDate||'').slice(0,7)===month);
+  if(!rows.length)return alert('No bills found for '+month+'.');
+  const blob=monthlyBillsPdfBlob(rows,month);
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='SKMedKART-Bills-'+month+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+};
+function monthlyBillsPdfBlob(rows,month){
+  const pageW=595,pageH=842,left=42,top=800,lineH=14,maxLines=52;
+  const pages=[];let lines=[];
+  const pushBill=b=>{
+    const billLines=['Sri Krishna Medicals','Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu','Phone: 8300363317','Invoice: '+b.invoiceNumber,'Date: '+(b.billDate||'-'),'Customer: '+(b.customerName||'Walk-in Customer'),'Mobile: '+(b.mobile||'-'),'Payment: '+(b.paymentMode||'-'),''];
+    (b.items||[]).forEach(i=>billLines.push((i.name||'-')+' | Batch '+(i.batchNumber||'-')+' | Qty '+Number(i.qty||0)+' | '+money(Number(i.qty||0)*Number(i.price||0))));
+    billLines.push('','Subtotal: '+money(b.subtotal),'Discount: '+money(b.discount),'GST: '+money(b.gst),'Grand Total: '+money(b.grandTotal),'----------------------------------------','');
+    for(const line of billLines){if(lines.length+1>maxLines){pages.push(lines);lines=[]}lines.push(line)}
+  };
+  rows.forEach(pushBill);if(lines.length||!pages.length)pages.push(lines);
+  const objs=[];const pageRefs=[];const contentRefs=[];const fontRef=1;
+  // Font object is object 1; page/content objects follow.
+  objs.push('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  pages.forEach((ls,pi)=>{
+    const content=['BT','/F1 10 Tf',left+' '+top+' Td'];
+    ls.forEach((line,i)=>{if(i)content.push('0 -'+lineH+' Td');content.push('('+pdfEscape(line)+') Tj')});content.push('ET');
+    const stream=content.join('\n');
+    const cIndex=objs.length+1;objs.push('<< /Length '+stream.length+' >>\nstream\n'+stream+'\nendstream');contentRefs.push(cIndex);
+    const pIndex=objs.length+1;objs.push('<< /Type /Page /Parent __PAGES__ 0 R /MediaBox [0 0 '+pageW+' '+pageH+'] /Resources << /Font << /F1 '+fontRef+' 0 R >> >> /Contents '+cIndex+' 0 R >>');pageRefs.push(pIndex);
+  });
+  const pagesIndex=objs.length+1;objs.push('<< /Type /Pages /Kids ['+pageRefs.map(n=>n+' 0 R').join(' ')+'] /Count '+pageRefs.length+' >>');
+  const catalogIndex=objs.length+1;objs.push('<< /Type /Catalog /Pages '+pagesIndex+' 0 R >>');
+  // Replace temporary parent token with the real Pages object number.
+  for(let i=0;i<objs.length;i++)objs[i]=objs[i].replace(/__PAGES__/g,String(pagesIndex));
+  let pdf='%PDF-1.4\n',offsets=[0];
+  objs.forEach((o,i)=>{offsets.push(pdf.length);pdf+=(i+1)+' 0 obj\n'+o+'\nendobj\n'});
+  const xref=pdf.length;pdf+='xref\n0 '+(objs.length+1)+'\n0000000000 65535 f \n'+offsets.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+'trailer\n<< /Size '+(objs.length+1)+' /Root '+catalogIndex+' 0 R >>\nstartxref\n'+xref+'\n%%EOF';
+  return new Blob([pdf],{type:'application/pdf'});
 }
 async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=[];purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);disableOnlineOrderFeatures();renderAll();return}if(liveStarted&&!force){disableOnlineOrderFeatures();renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});
   // Only data required for stock upload/purchase and billing is synchronized. No online-order listener.
@@ -278,7 +361,19 @@ window.printBill=id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return 
 function pdfEscape(s){return String(s??'').replace(/\\/g,'\\\\').replace(/[()]/g,'\\$&').replace(/[^\x20-\x7E]/g,'?')}
 function pdfBlob(b){const lines=['Sri Krishna Medicals','Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu','Phone: 8300363317','Drug Licence No: TN/DPI/01386/20,21','FSSAI Licence No: 22422039000512','','Invoice: '+b.invoiceNumber,'Date: '+b.billDate,'Customer: '+b.customerName,'Mobile: '+(b.mobile||'-'),'Prescribed By: '+(b.doctor||'-'),'','MEDICINE / BATCH / QTY / AMOUNT',...b.items.map(i=>i.name+' / '+i.batchNumber+' / '+i.qty+' / '+money(i.qty*i.price)),'','Subtotal: '+money(b.subtotal),'Discount: '+money(b.discount),'GST: '+money(b.gst),'Grand Total: '+money(b.grandTotal),'Payment: '+b.paymentMode];const text=['BT','/F1 10 Tf','50 800 Td',...lines.flatMap((l,i)=>[i?'0 -16 Td':'', '('+pdfEscape(l)+') Tj']).filter(Boolean),'ET'].join('\n');const objs=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>','<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>','<< /Length '+text.length+' >>\nstream\n'+text+'\nendstream'];let pdf='%PDF-1.4\n',offset=[0];objs.forEach((o,i)=>{offset.push(pdf.length);pdf+=(i+1)+' 0 obj\n'+o+'\nendobj\n'});const x=pdf.length;pdf+='xref\n0 '+(objs.length+1)+'\n0000000000 65535 f \n'+offset.slice(1).map(n=>String(n).padStart(10,'0')+' 00000 n \n').join('')+'trailer\n<< /Size '+(objs.length+1)+' /Root 1 0 R >>\nstartxref\n'+x+'\n%%EOF';return new Blob([pdf],{type:'application/pdf'})}
 window.saveBillPdf=id=>{const b=findBill(id);if(!b)return;const blob=pdfBlob(b),a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=b.invoiceNumber+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)};
-window.shareBill=async id=>{const b=findBill(id);if(!b)return;const text='Sri Krishna Medicals, Pennagaram\nInvoice: '+b.invoiceNumber+'\nCustomer: '+(b.customerName||'Walk-in Customer')+'\nTotal: '+money(b.grandTotal)+'\nPayment: '+(b.paymentMode||'Cash');const wa='https://wa.me/?text='+encodeURIComponent(text);try{window.open(wa,'_blank');}catch(e){location.href=wa}};
+window.shareBill=async id=>{
+  const b=findBill(id);if(!b)return;
+  const blob=pdfBlob(b),file=new File([blob],(b.invoiceNumber||'Invoice')+'.pdf',{type:'application/pdf'});
+  try{
+    if(navigator.share&&(!navigator.canShare||navigator.canShare({files:[file]}))){
+      await navigator.share({title:'Sri Krishna Medicals - '+b.invoiceNumber,text:'Invoice '+b.invoiceNumber,files:[file]});
+      return;
+    }
+  }catch(e){if(e?.name==='AbortError')return;console.warn('PDF share failed:',e)}
+  // Fallback: download the same PDF so it can be attached manually in WhatsApp.
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=(b.invoiceNumber||'Invoice')+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1500);
+  alert('PDF saved. Attach this PDF in WhatsApp to share the bill.');
+};
 
 function billViewHtml(b){const returned=b.returned?'<div class="returnInfo">↩ This bill was returned on '+esc(b.returnedAtText||b.returnedAt||b.billDate||'')+'. Stock has been restored.</div>':'';const shop='<div class="card shopBillHeader" style="padding:14px;margin:10px 0;text-align:center"><b style="font-size:20px">Sri Krishna Medicals</b><br><span>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</span><br><span>📞 8300363317</span><br><span><b>Drug Licence No:</b> TN/DPI/01386/20,21</span><br><span><b>FSSAI Licence No:</b> 22422039000512</span></div>';return '<h2>📄 Invoice '+esc(b.invoiceNumber)+'</h2>'+returned+'<p class="small">'+esc(b.billDate||'')+' • '+esc(b.paymentMode||'')+'</p>'+shop+'<div class="card" style="padding:14px;margin:10px 0"><b>Customer:</b> '+esc(b.customerName||'Walk-in Customer')+'<br><b>Mobile:</b> '+esc(b.mobile||'-')+'<br><b>Prescribed by:</b> '+esc(b.doctor||'-')+'</div><table class="viewBillTable"><thead><tr><th>Medicine</th><th>Batch</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>'+((b.items||[]).map(i=>'<tr><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td>'+Number(i.qty||0)+'</td><td>'+money(i.price)+'</td><td>'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join(''))+'</tbody></table><div class="modalTotals"><div class="totalLine"><span>Subtotal</span><b>'+money(b.subtotal)+'</b></div><div class="totalLine"><span>Discount</span><b>-'+money(b.discount)+'</b></div><div class="totalLine"><span>GST</span><b>'+money(b.gst)+'</b></div><div class="totalLine grand"><span>Grand Total</span><span>'+money(b.grandTotal)+'</span></div></div><div class="modalActions"><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">🖨 Print</button><button class="secondary" onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">📄 Save PDF</button><button class="ok" onclick="shareBill(\''+esc(b.id||b.invoiceNumber)+'\')">📤 Share</button>'+(!b.returned?'<button class="danger" onclick="returnBill(\''+esc(b.id||b.invoiceNumber)+'\')">↩ Return Bill</button>':'<button class="danger" onclick="deleteBillRecord(\''+esc(b.id||b.invoiceNumber)+'\')">🗑 Delete Record</button>')+'</div>'}
 window.viewBill=id=>{const b=findBill(id);if(!b)return alert('Bill not found.');$('billModalContent').innerHTML=billViewHtml(b);const shareBtn=$('billModalContent')?.querySelector('[data-share-bill]');if(shareBtn)shareBtn.onclick=()=>window.shareBill(b.id||b.invoiceNumber);$('billModal').classList.remove('hidden')};window.closeBillView=()=>$('billModal').classList.add('hidden');$('billModal')?.addEventListener('click',e=>{if(e.target===$('billModal'))closeBillView()});
@@ -610,4 +705,4 @@ window.scanBarcode=()=>alert('Barcode scanner is not available in this browser b
 window.searchMedicine=()=>{};
 window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
 window.openBillViewFromButton=id=>window.viewBill(id);
-window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
+window.addEventListener('DOMContentLoaded',()=>{arrangeFinalNavigation();addMonthlyArchiveControl();window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
