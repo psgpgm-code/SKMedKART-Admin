@@ -1,6 +1,6 @@
 // V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
-// V5.8 all-fixed release: clear obsolete client-only cache keys once.
+// Stock + Billing only release: keep existing local data cleanup behavior unchanged.
 // Live Firebase data is not deleted by this code.
 try{
   if(localStorage.getItem('skmedkart_release')!=='v5.9-restock-discount-reminder'){
@@ -120,7 +120,27 @@ window.adminLogout=()=>{
 };
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
-async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
+// Stock + Billing only: online customer orders, order listeners, reports and reminders are intentionally disabled.
+function disableOnlineOrderFeatures(){
+  document.querySelectorAll('.tab[data-view="orders"],.tab[data-view="reports"]').forEach(el=>el.style.display='none');
+  $('orders')?.classList.add('hidden');
+  $('reports')?.classList.add('hidden');
+  document.querySelectorAll('#home button').forEach(btn=>{
+    const txt=(btn.textContent||'').trim().toLowerCase();
+    if(txt.includes('reminders')) btn.style.display='none';
+  });
+}
+async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=[];purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=[];suppliers=get('suppliers',[]);disableOnlineOrderFeatures();renderAll();return}if(liveStarted&&!force){disableOnlineOrderFeatures();renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});
+  // Only data required for stock upload/purchase and billing is synchronized. No online-order listener.
+  listen('products',v=>products=v);
+  listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+  listen('batches',v=>batches=v);
+  listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+  listen('customers',v=>customers=v);
+  listen('suppliers',v=>suppliers=v);
+  currentOrders=[];reminders=[];
+  disableOnlineOrderFeatures();
+} window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
 function renderMedicineCheck(){
  const r=$('mcResult'); if(!r)return;
