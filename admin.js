@@ -213,6 +213,7 @@ window.setDiscountType=(type)=>{
   if(input){input.placeholder=discountType==='percent'?'0 - 100':'0';input.max=discountType==='percent'?'100':'';}
   renderBilling();
 };
+window.setGstRate=()=>{const input=$('bGst');if(!input)return;const value=prompt('Enter GST %',input.value||'0');if(value===null)return;const rate=Math.max(0,Number(value)||0);input.value=rate;renderBilling()};
 function billTotals(items=billCart){
  const sub=items.reduce((sum,x)=>sum+Number(x.qty||0)*Number(x.price||0),0);
  const discInput=$('bDiscount'),gstInput=$('bGst');
@@ -583,14 +584,14 @@ function renderReminders(){const list=$('reminderList');if(!list)return;const no
 window.showH1Purchases=()=>{
  const rows=purchases.filter(x=>{const p=products.find(pr=>pr.id===scheduleProductId(x));return p&&scheduleValue(p)==='H1';});
  const html=rows.slice(0,200).map(x=>'<div class="itemrow"><b>'+esc(x.productName||x.medicine||x.name||'-')+'</b> <span class="pill">Schedule H1</span><br><span class="small">Qty '+Number(x.qty||0)+' • Batch '+esc(x.batchNumber||x.batch||'-')+' • Date '+esc(x.purchaseDate||x.createdAt||'-')+' • Supplier '+esc(x.supplier||x.supplierName||'-')+' • Value '+money(Number(x.qty||0)*Number(x.purchasePriceWithGst??x.purchasePrice??0))+'</span></div>').join('')||'<div class="small">No H1 purchase records found.</div>';
- $('billModalContent').innerHTML='<button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><h3>💊 H1 Purchases Only</h3><p class="small">Only purchased medicines classified as Schedule H1 are shown.</p>'+html;
+ $('billModalContent').innerHTML='<h3>💊 H1 Purchases Only</h3><p class="small">Only purchased medicines classified as Schedule H1 are shown.</p>'+html;
  $('billModal').classList.remove('hidden');
 };
 window.showH1Sales=()=>{
  const h1=products.filter(p=>scheduleValue(p)==='H1');
  const rows=[];for(const b of bills){if(b.returned)continue;for(const it of (b.items||[])){const p=h1.find(pr=>scheduleItemMatches(it,pr));if(p)rows.push({b,it,p});}}
  const html=rows.slice(0,200).map(x=>'<div class="itemrow"><b>'+esc(x.it.name||x.p.name||'-')+'</b> <span class="pill">Schedule H1</span><br><span class="small">Bill '+esc(x.b.invoiceNumber||'-')+' • '+esc(x.b.billDate||'-')+' • Customer '+esc(x.b.customerName||'-')+' • Qty '+Number(x.it.qty||x.it.quantity||0)+' • Value '+money(Number(x.it.qty||x.it.quantity||0)*Number(x.it.price||0))+'</span></div>').join('')||'<div class="small">No H1 billed/sales records found.</div>';
- $('billModalContent').innerHTML='<button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><h3>🧾 H1 Sales / Billed Only</h3><p class="small">Only billed medicines classified as Schedule H1 are shown.</p>'+html;
+ $('billModalContent').innerHTML='<h3>🧾 H1 Sales / Billed Only</h3><p class="small">Only billed medicines classified as Schedule H1 are shown.</p>'+html;
  $('billModal').classList.remove('hidden');
 };
 window.show=(id)=>{document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===id));$(id)?.classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});if(id==='stock')renderStock();if(id==='purchase')renderPurchases();if(id==='billing')renderBilling();if(id==='history')renderBillHistory();};
