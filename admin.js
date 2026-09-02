@@ -1,6 +1,6 @@
 // V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
-// V5.8 all-fixed release: clear obsolete client-only cache keys once.
+// Stock + Billing only release: keep existing local data cleanup behavior unchanged.
 // Live Firebase data is not deleted by this code.
 try{
   if(localStorage.getItem('skmedkart_release')!=='v5.9-restock-discount-reminder'){
@@ -17,8 +17,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-// OFFLINE-ONLY ADMIN BUILD: Firebase/online sync is intentionally disabled.
-const configured=false;
+const configured=!!(cfg.apiKey&&cfg.authDomain&&cfg.projectId);
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 async function ensureFirebase(){
@@ -51,7 +50,7 @@ async function ensureFirebase(){
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-$('notice').innerHTML='<b>📱 Offline mode</b><br><span class="small">Billing, purchases, batches, stock and other existing features are stored on this device.</span>';
+$('notice').innerHTML=configured?'<b>☁️ Live Firebase mode</b><br><span class="small">Billing, purchases, batches and stock are synchronized.</span>':'<b>📱 Demo mode</b><br><span class="small">Data is stored only in this browser.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
 function normalizeEmail(v){return String(v||'').trim().toLowerCase()}
@@ -120,17 +119,28 @@ window.adminLogout=()=>{
   if(configured)signOut(auth).catch(e=>console.error('Logout error:',e)).finally(close);else close();
 };
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
-// OFFLINE-ONLY: no Firebase authentication/login is required. Open the existing dashboard directly.
-window.addEventListener('DOMContentLoaded',()=>{
-  try{
-    $('loginCard')?.classList.add('hidden');
-    $('panel')?.classList.remove('hidden');
-    $('bottomNav')?.classList.remove('hidden');
-    Promise.resolve(loadAll()).catch(e=>console.error('Offline dashboard load error:',e));
-  }catch(e){console.error('Offline dashboard open error:',e)}
-});
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
-async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
+// Stock + Billing only: online customer orders, order listeners, reports and reminders are intentionally disabled.
+function disableOnlineOrderFeatures(){
+  document.querySelectorAll('.tab[data-view="orders"],.tab[data-view="reports"]').forEach(el=>el.style.display='none');
+  $('orders')?.classList.add('hidden');
+  $('reports')?.classList.add('hidden');
+  document.querySelectorAll('#home button').forEach(btn=>{
+    const txt=(btn.textContent||'').trim().toLowerCase();
+    if(txt.includes('reminders')) btn.style.display='none';
+  });
+}
+async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=[];purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=[];suppliers=get('suppliers',[]);disableOnlineOrderFeatures();renderAll();return}if(liveStarted&&!force){disableOnlineOrderFeatures();renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});
+  // Only data required for stock upload/purchase and billing is synchronized. No online-order listener.
+  listen('products',v=>products=v);
+  listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+  listen('batches',v=>batches=v);
+  listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+  listen('customers',v=>customers=v);
+  listen('suppliers',v=>suppliers=v);
+  currentOrders=[];reminders=[];
+  disableOnlineOrderFeatures();
+} window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
 function renderMedicineCheck(){
  const r=$('mcResult'); if(!r)return;
@@ -223,7 +233,6 @@ window.setDiscountType=(type)=>{
   if(input){input.placeholder=discountType==='percent'?'0 - 100':'0';input.max=discountType==='percent'?'100':'';}
   renderBilling();
 };
-window.setGstRate=()=>{const input=$('bGst');if(!input)return;const value=prompt('Enter GST %',input.value||'0');if(value===null)return;const rate=Math.max(0,Number(value)||0);input.value=rate;renderBilling()};
 function billTotals(items=billCart){
  const sub=items.reduce((sum,x)=>sum+Number(x.qty||0)*Number(x.price||0),0);
  const discInput=$('bDiscount'),gstInput=$('bGst');
@@ -337,32 +346,17 @@ window.savePurchase=async()=>{
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
 
-window.renderPurchases=()=>{
- const input=$('purchaseSearch'),box=$('purchases');
- if(!input||!box)return;
- const q=String(input.value||'').trim().toLowerCase();
- if(!q){box.innerHTML=purchases.slice(0,100).map(p=>purchaseRow(p)).join('')||'<div class="small">No purchases found.</div>';return}
- const purchaseRows=purchases.filter(p=>{
-   const prod=products.find(x=>x.id===p.productId);
-   const text=[p.productName,p.medicine,p.name,p.supplier,p.supplierName,p.invoice,p.invoiceNo,p.batchNumber,p.batch,p.expiryDate,prod?.name,prod?.barcode].map(v=>String(v??'')).join(' ').toLowerCase();
-   return text.includes(q);
- }).slice(0,100);
- if(purchaseRows.length){box.innerHTML=purchaseRows.map(p=>purchaseRow(p)).join('');return}
- const productRows=products.filter(p=>{
-   const text=[p.name,p.barcode,p.cat,p.category].map(v=>String(v??'')).join(' ').toLowerCase();
-   return text.includes(q);
- }).slice(0,30);
- if(productRows.length){
-   const productIds=new Set(productRows.map(p=>p.id));
-   const linked=purchases.filter(p=>productIds.has(p.productId));
-   if(linked.length){box.innerHTML=linked.slice(0,100).map(p=>purchaseRow(p)).join('');return}
-   box.innerHTML=productRows.map(p=>'<div class="itemrow"><b>'+esc(p.name||'-')+'</b><br><span class="small">Current stock: '+Number(p.stock||0)+' • No purchase record found for this medicine.</span></div>').join('');
-   return;
- }
- box.innerHTML='<div class="small">No purchases or products found for “'+esc(input.value)+'”.</div>';
-};
-
-function purchaseRow(p){return '<div class="itemrow"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class="small">'+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span></div>'}
+function renderPurchases(){
+ const input=$('purchaseSearch'),box=$('purchases'); if(!box)return;
+ const q=String(input?.value||'').trim().toLowerCase();
+ const norm=v=>String(v??'').trim().toLowerCase();
+ const rows=purchases.filter(p=>{if(!q)return true;const text=[p.productName,p.medicine,p.name,p.productId,p.supplier,p.supplierName,p.invoice,p.invoiceNo,p.batchNumber,p.batch,p.expiryDate,p.purchaseDate].map(norm).join(' ');return text.includes(q)}).slice(0,100);
+ box.innerHTML=rows.map(p=>{
+  const qty=Number(p.qty||0),base=Number(p.purchasePrice||0),gst=Number(p.purchaseGstRate||0),withGst=Number(p.purchasePriceWithGst??(base*(1+gst/100)));
+  return '<div class="itemrow"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+qty+'<br><span class="small">'+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+base.toFixed(2)+' + GST '+gst.toFixed(2)+'% = ₹'+withGst.toFixed(2)+'</span></div>';
+ }).join('')||'<div class="small">No purchases found.</div>';
+}
+$('purchaseSearch')?.addEventListener('input',renderPurchases);
 function renderBatches(){$('batchList').innerHTML=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{const st=expiryStatus(b);return '<div class=\"itemrow\"><b>'+esc(b.productName||b.productId)+'</b><span class=\"pill '+(st==='OK'?'':'bad')+'\">'+st+'</span><br><span class=\"small\">Batch '+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+' • MRP '+money(b.mrp)+' • Sell '+money(b.sellingPrice)+'</span><br><button class=\"danger\" style=\"margin-top:8px;width:auto\" onclick=\"deleteBatch(\''+esc(b.id)+'\')\">🗑️ Delete This Batch</button></div>'}).join('')||'<div class=\"small\">No batches yet. Add stock through Purchase or Opening Stock.</div>'}
 
 window.deleteBatch=async (id)=>{const b=batches.find(x=>x.id===id);if(!b)return alert('Batch not found.');if(!confirm('Delete batch '+(b.batchNumber||'')+' for '+(b.productName||'this medicine')+'? This cannot be undone. Current stock '+Number(b.stock||0)+' will be removed from inventory.'))return;try{if(configured){await runTransaction(db,async tx=>{const br=doc(db,'batches',id),pr=doc(db,'products',b.productId),bs=await tx.get(br),ps=await tx.get(pr);if(!bs.exists())throw Error('Batch not found.');const live=bs.data();if(ps.exists()){const next=Math.max(0,Number(ps.data().stock||0)-Number(live.stock||0));tx.update(pr,{stock:next,updatedAt:serverTimestamp()});}tx.delete(br);tx.set(doc(collection(db,'stockMovements')),{type:'BATCH_DELETE',productId:live.productId||b.productId,batchId:id,batchNumber:live.batchNumber||b.batchNumber,qty:-Number(live.stock||0),reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:serverTimestamp()});});}else{const qty=Number(b.stock||0),prod=products.find(x=>x.id===b.productId);if(prod)prod.stock=Math.max(0,Number(prod.stock||0)-qty);batches=batches.filter(x=>x.id!==id);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push({id:'DEL'+Date.now(),type:'BATCH_DELETE',productId:b.productId,batchId:id,batchNumber:b.batchNumber,qty:-qty,reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Batch deleted successfully. Product stock has been recalculated.');renderAll()}catch(e){alert('Could not delete batch: '+e.message)}};
@@ -591,19 +585,6 @@ window.deleteReminder=async id=>{if(!confirm('Delete this customer reminder?'))r
 function renderReminders(){const list=$('reminderList');if(!list)return;const now=new Date();now.setHours(0,0,0,0);const rs=reminders.slice().sort((x,y)=>String(reminderDateOf(x)).localeCompare(String(reminderDateOf(y))));const due=rs.filter(r=>{const ds=reminderDateOf(r);return ds&&new Date(ds+'T00:00:00')<=new Date(now.getTime()+7*86400000)});const count=$('reminderDueCount');if(count)count.textContent=due.length?('Due: '+due.length):'';list.innerHTML=rs.map(r=>{const ds=reminderDateOf(r),phone=String(r.mobile||'').replace(/\D/g,''),wa=phone.length===10?'91'+phone:phone,msg=encodeURIComponent('Hello '+(r.customerName||'')+', this is Sri Krishna Medicals, Pennagaram. Reminder for '+(r.medicine||'medicine')+'.');const diff=ds?Math.round((new Date(ds+'T00:00:00')-now)/86400000):99,cls=diff<0?'overdueReminder':diff<=7?'dueReminder':'';return '<div class="itemrow '+cls+'"><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(ds)+' • '+esc(reminderStatus(r))+' • Every '+Math.max(1,Number(r.repeatDays)||30)+' days • '+esc(r.mode||'Monthly Medicine')+'<br>'+esc(r.mobile||'')+(r.note?'<br>📝 '+esc(r.note):'')+'</span><div class="reminderActions"><button class="ok" onclick="completeReminder(\''+esc(r.id)+'\')">✓ Done / Next</button>'+(wa?'<a class="link" target="_blank" href="https://wa.me/'+esc(wa)+'?text='+msg+'">WhatsApp</a>':'')+'<button class="danger" onclick="deleteReminder(\''+esc(r.id)+'\')">Delete</button></div></div>'}).join('')||'<div class="small">No customer reminders yet.</div>';}
 
 // UI bridge for the matching V5.9 HTML. These handlers keep every visible button connected.
-window.showH1Purchases=()=>{
- const rows=purchases.filter(x=>{const p=products.find(pr=>pr.id===scheduleProductId(x));return p&&scheduleValue(p)==='H1';});
- const html=rows.slice(0,200).map(x=>'<div class="itemrow"><b>'+esc(x.productName||x.medicine||x.name||'-')+'</b> <span class="pill">Schedule H1</span><br><span class="small">Qty '+Number(x.qty||0)+' • Batch '+esc(x.batchNumber||x.batch||'-')+' • Date '+esc(x.purchaseDate||x.createdAt||'-')+' • Supplier '+esc(x.supplier||x.supplierName||'-')+' • Value '+money(Number(x.qty||0)*Number(x.purchasePriceWithGst??x.purchasePrice??0))+'</span></div>').join('')||'<div class="small">No H1 purchase records found.</div>';
- $('billModalContent').innerHTML='<h3>💊 H1 Purchases Only</h3><p class="small">Only purchased medicines classified as Schedule H1 are shown.</p>'+html;
- $('billModal').classList.remove('hidden');
-};
-window.showH1Sales=()=>{
- const h1=products.filter(p=>scheduleValue(p)==='H1');
- const rows=[];for(const b of bills){if(b.returned)continue;for(const it of (b.items||[])){const p=h1.find(pr=>scheduleItemMatches(it,pr));if(p)rows.push({b,it,p});}}
- const html=rows.slice(0,200).map(x=>'<div class="itemrow"><b>'+esc(x.it.name||x.p.name||'-')+'</b> <span class="pill">Schedule H1</span><br><span class="small">Bill '+esc(x.b.invoiceNumber||'-')+' • '+esc(x.b.billDate||'-')+' • Customer '+esc(x.b.customerName||'-')+' • Qty '+Number(x.it.qty||x.it.quantity||0)+' • Value '+money(Number(x.it.qty||x.it.quantity||0)*Number(x.it.price||0))+'</span></div>').join('')||'<div class="small">No H1 billed/sales records found.</div>';
- $('billModalContent').innerHTML='<h3>🧾 H1 Sales / Billed Only</h3><p class="small">Only billed medicines classified as Schedule H1 are shown.</p>'+html;
- $('billModal').classList.remove('hidden');
-};
 window.show=(id)=>{document.querySelectorAll('.view').forEach(v=>v.classList.add('hidden'));document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===id));$(id)?.classList.remove('hidden');window.scrollTo({top:0,behavior:'smooth'});if(id==='stock')renderStock();if(id==='purchase')renderPurchases();if(id==='billing')renderBilling();if(id==='history')renderBillHistory();};
 window.openBillHistory=()=>window.show('history');
 window.openReminderManager=()=>window.show('reminders');
