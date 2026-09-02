@@ -79,8 +79,15 @@ window.adminLogin=async()=>{
   if(!em){loginMessage('⚠️ Please enter your admin email.','error');$('email')?.focus();return}
   if(!pw){loginMessage('⚠️ Please enter your password.','error');$('password')?.focus();return}
   if(!configured){
-    if(em==='admin@skmedkart.local'&&pw==='1234'){loginMessage('✓ Login successful. Opening admin panel...','success');showPanel();return}
-    loginMessage('❌ Wrong email or password. Demo login: admin@skmedkart.local / 1234','error');return
+    // OFFLINE LOGIN ONLY: validate the existing admin credentials locally.
+    // No Firebase connection, no data clearing, and no other feature changes.
+    if(em==='psgpgm@gmail.com'&&pw==='7200673944'){
+      loginMessage('✓ Login successful. Opening admin panel...','success');
+      showPanel();
+      return;
+    }
+    loginMessage('❌ Wrong email or password.','error');
+    return;
   }
   if(loginOpening)return;
   try{
