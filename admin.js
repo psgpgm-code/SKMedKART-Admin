@@ -1,6 +1,14 @@
 // V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
-// Offline data safety: never clear existing localStorage data.
+// V5.8 all-fixed release: clear obsolete client-only cache keys once.
+// Live Firebase data is not deleted by this code.
+try{
+  if(localStorage.getItem('skmedkart_release')!=='v5.9-restock-discount-reminder'){
+    ['bills','orders','products','batches','purchases','customers','reminders','stockMovements','suppliers'].forEach(k=>localStorage.removeItem(k));
+    localStorage.setItem('skmedkart_release','v5.9-restock-discount-reminder');
+  }
+}catch(e){}
+
 const K='skm_pharmacy_v2_';
 let initializeApp,getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut,getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc;
 let firebaseReadyPromise=null;
@@ -9,8 +17,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-// OFFLINE-ONLY ADMIN BUILD: Firebase/online sync is intentionally disabled.
-const configured=false;
+const configured=!!(cfg.apiKey&&cfg.authDomain&&cfg.projectId);
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 async function ensureFirebase(){
@@ -43,7 +50,7 @@ async function ensureFirebase(){
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-$('notice').innerHTML='<b>📱 Offline mode</b><br><span class="small">Billing, purchases, batches, stock and other existing features are stored on this device.</span>';
+$('notice').innerHTML=configured?'<b>☁️ Live Firebase mode</b><br><span class="small">Billing, purchases, batches and stock are synchronized.</span>':'<b>📱 Demo mode</b><br><span class="small">Data is stored only in this browser.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
 function normalizeEmail(v){return String(v||'').trim().toLowerCase()}
@@ -79,15 +86,8 @@ window.adminLogin=async()=>{
   if(!em){loginMessage('⚠️ Please enter your admin email.','error');$('email')?.focus();return}
   if(!pw){loginMessage('⚠️ Please enter your password.','error');$('password')?.focus();return}
   if(!configured){
-    // OFFLINE LOGIN ONLY: validate the existing admin credentials locally.
-    // No Firebase connection, no data clearing, and no other feature changes.
-    if(em==='psgpgm@gmail.com'&&pw==='7200673944'){
-      loginMessage('✓ Login successful. Opening admin panel...','success');
-      showPanel();
-      return;
-    }
-    loginMessage('❌ Wrong email or password.','error');
-    return;
+    if(em==='admin@skmedkart.local'&&pw==='1234'){loginMessage('✓ Login successful. Opening admin panel...','success');showPanel();return}
+    loginMessage('❌ Wrong email or password. Demo login: admin@skmedkart.local / 1234','error');return
   }
   if(loginOpening)return;
   try{
@@ -582,12 +582,7 @@ function renderReminders(){const list=$('reminderList');if(!list)return;const no
 
 // UI bridge for the matching V5.9 HTML. These handlers keep every visible button connected.
 window.showH1Purchases=()=>{
- const rows=purchases.filter(x=>{
-   const pid=scheduleProductId(x);
-   const name=String(x.productName||x.medicine||x.name||'').trim().toLowerCase();
-   const p=products.find(pr=>(pid&&pr.id===pid)||(name&&String(pr.name||'').trim().toLowerCase()===name));
-   return p&&scheduleValue(p)==='H1';
- });
+ const rows=purchases.filter(x=>{const p=products.find(pr=>pr.id===scheduleProductId(x));return p&&scheduleValue(p)==='H1';});
  const html=rows.slice(0,200).map(x=>'<div class="itemrow"><b>'+esc(x.productName||x.medicine||x.name||'-')+'</b> <span class="pill">Schedule H1</span><br><span class="small">Qty '+Number(x.qty||0)+' • Batch '+esc(x.batchNumber||x.batch||'-')+' • Date '+esc(x.purchaseDate||x.createdAt||'-')+' • Supplier '+esc(x.supplier||x.supplierName||'-')+' • Value '+money(Number(x.qty||0)*Number(x.purchasePriceWithGst??x.purchasePrice??0))+'</span></div>').join('')||'<div class="small">No H1 purchase records found.</div>';
  $('billModalContent').innerHTML='<h3>💊 H1 Purchases Only</h3><p class="small">Only purchased medicines classified as Schedule H1 are shown.</p>'+html;
  $('billModal').classList.remove('hidden');
