@@ -1,13 +1,7 @@
 // V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
-// V5.8 all-fixed release: clear obsolete client-only cache keys once.
-// Live Firebase data is not deleted by this code.
-try{
-  if(localStorage.getItem('skmedkart_release')!=='v5.9-restock-discount-reminder'){
-    ['bills','orders','products','batches','purchases','customers','reminders','stockMovements','suppliers'].forEach(k=>localStorage.removeItem(k));
-    localStorage.setItem('skmedkart_release','v5.9-restock-discount-reminder');
-  }
-}catch(e){}
+// V5.9.4 OFFLINE-FIRST: never clear existing local data.
+// A one-time Firebase migration copies existing cloud data into local storage.
 
 const K='skm_pharmacy_v2_';
 let initializeApp,getAuth,signInWithEmailAndPassword,onAuthStateChanged,signOut,getFirestore,collection,onSnapshot,doc,updateDoc,serverTimestamp,addDoc,setDoc,runTransaction,getDocs,writeBatch,deleteDoc;
@@ -17,7 +11,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-const configured=!!(cfg.apiKey&&cfg.authDomain&&cfg.projectId);
+const configured=false; // PERMANENT OFFLINE MODE: no live Firebase listeners/writes.
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 async function ensureFirebase(){
@@ -50,11 +44,11 @@ async function ensureFirebase(){
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-$('notice').innerHTML=configured?'<b>☁️ Live Firebase mode</b><br><span class="small">Billing, purchases, batches and stock are synchronized.</span>':'<b>📱 Demo mode</b><br><span class="small">Data is stored only in this browser.</span>';
+$('notice').innerHTML='<b>📱 Offline-first mode</b><br><span class="small">Your data is stored on this phone. Existing Firebase data will be imported once, then Firebase will remain disconnected.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
 function normalizeEmail(v){return String(v||'').trim().toLowerCase()}
-function showPanel(){
+async function showPanel(){
   try{
     clearLoginMessage();
     const login=$('loginCard'),panel=$('panel'),nav=$('bottomNav');
@@ -62,9 +56,12 @@ function showPanel(){
     login.classList.add('hidden');
     panel.classList.remove('hidden');
     nav.classList.remove('hidden');
-    // Opening the panel must never depend on Firestore finishing successfully.
-    Promise.resolve(loadAll()).catch(e=>{console.error('Dashboard load error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Dashboard opened, but some Firebase data could not load.</b><br><span class="small">'+esc(e?.message||'Check Firebase rules and internet connection.')+'</span>'});
-  }catch(e){console.error('Open panel error:',e);loginMessage('❌ Login succeeded but the dashboard could not open: '+(e?.message||'Unknown error'),'error');throw e}
+    await loadAll();
+  }catch(e){
+    console.error('Open panel error:',e);
+    loginMessage('❌ Dashboard could not open: '+(e?.message||'Unknown error'),'error');
+    throw e
+  }
 }
 window.togglePasswordVisibility=()=>{const p=$('password'),b=$('togglePassword');if(!p)return;const show=p.type==='password';p.type=show?'text':'password';if(b){b.textContent=show?'🙈':'👁️';b.setAttribute('aria-label',show?'Hide password':'Show password')}};
 function loginErrorMessage(e){
@@ -86,8 +83,13 @@ window.adminLogin=async()=>{
   if(!em){loginMessage('⚠️ Please enter your admin email.','error');$('email')?.focus();return}
   if(!pw){loginMessage('⚠️ Please enter your password.','error');$('password')?.focus();return}
   if(!configured){
-    if(em==='admin@skmedkart.local'&&pw==='1234'){loginMessage('✓ Login successful. Opening admin panel...','success');showPanel();return}
-    loginMessage('❌ Wrong email or password. Demo login: admin@skmedkart.local / 1234','error');return
+    // Offline admin login. No network/Firebase is required for normal use.
+    if((em==='admin@skmedkart.local'&&pw==='1234') || (em==='psgpgm@gmail.com'&&pw==='7200673944')){
+      loginMessage('✓ Login successful. Opening offline admin panel...','success');
+      await showPanel();
+      return
+    }
+    loginMessage('❌ Wrong email or password.','error');return
   }
   if(loginOpening)return;
   try{
@@ -120,7 +122,81 @@ window.adminLogout=()=>{
 };
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
-async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}if(liveStarted&&!force){renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('products',v=>products=v);listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('batches',v=>batches=v);listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));listen('customers',v=>customers=v);listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));listen('suppliers',v=>suppliers=v)} window.loadAll=loadAll;
+async function migrateFirebaseOnce(){
+  const FLAG='skm_offline_migration_v1_done';
+  if(localStorage.getItem(FLAG)==='yes')return {done:true,skipped:true};
+  // Keep a local safety copy before importing anything. Never delete existing data.
+  try{localStorage.setItem('skm_offline_pre_migration_backup_v1',JSON.stringify({
+    products:get('products',[]),batches:get('batches',[]),purchases:get('purchases',[]),bills:get('bills',[]),
+    customers:get('customers',[]),reminders:get('reminders',[]),suppliers:get('suppliers',[]),orders:get('orders',[]),
+    stockMovements:get('stockMovements',[]),savedAt:new Date().toISOString()
+  }))}catch(e){console.warn('Pre-migration local backup failed:',e)}
+  const n=$('notice');
+  if(n)n.innerHTML='<b>☁️ One-time data migration</b><br><span class="small">Importing your existing Firebase stock, batches, purchases and bills into this phone. Live Firebase mode will not be enabled.</span>';
+  try{
+    const [appMod,fsMod]=await Promise.all([
+      import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
+      import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js')
+    ]);
+    const app=appMod.initializeApp(cfg,'SKMedKARTOfflineMigration');
+    const fdb=fsMod.getFirestore(app);
+    const names=['products','batches','purchases','bills','customers','reminders','suppliers','orders','stockMovements'];
+    const normalize=v=>{
+      if(v&&typeof v.toDate==='function')return v.toDate().toISOString();
+      if(Array.isArray(v))return v.map(normalize);
+      if(v&&typeof v==='object'){const o={};for(const [k,x] of Object.entries(v))o[k]=normalize(x);return o}
+      return v;
+    };
+    const remote={};
+    for(const name of names){
+      const snap=await fsMod.getDocs(fsMod.collection(fdb,name));
+      remote[name]=snap.docs.map(d=>normalize({id:d.id,...d.data()}));
+    }
+    const merge=(localRows,remoteRows)=>{
+      const out=new Map();
+      for(const row of (Array.isArray(localRows)?localRows:[])){const id=String(row?.id||'');if(id)out.set(id,row);else out.set('__local_'+out.size,row)}
+      for(const row of (Array.isArray(remoteRows)?remoteRows:[])){const id=String(row?.id||'');if(id)out.set(id,row);else out.set('__remote_'+out.size,row)}
+      return [...out.values()];
+    };
+    for(const name of names){
+      const local=name==='orders'?get('orders',[]):get(name,[]);
+      const combined=merge(local,remote[name]);
+      set(name,combined);
+    }
+    localStorage.setItem(FLAG,'yes');
+    localStorage.setItem('skm_offline_migration_completed_at',new Date().toISOString());
+    if(n)n.innerHTML='<b>📱 Offline mode active</b><br><span class="small">Existing Firebase data has been copied to this phone. Billing, purchases and stock now work locally without live Firebase.</span>';
+    return {done:true,skipped:false,counts:Object.fromEntries(names.map(x=>[x,remote[x].length]))};
+  }catch(e){
+    console.error('One-time Firebase migration failed:',e);
+    if(n)n.innerHTML='<b>📱 Offline mode active</b><br><span class="small">No cloud migration was completed. Existing local data was preserved. Connect to the internet once and reload to retry the migration.</span>';
+    return {done:false,error:e};
+  }
+}
+window.migrateFirebaseOnce=migrateFirebaseOnce;
+
+async function loadAll(force=false){
+  if(force && localStorage.getItem('skm_offline_migration_v1_done')!=='yes'){
+    await migrateFirebaseOnce();
+  } else if(force){
+    renderAll();
+    return
+  }
+  // First successful launch performs exactly one Firestore read-only migration.
+  if(localStorage.getItem('skm_offline_migration_v1_done')!=='yes'){
+    await migrateFirebaseOnce();
+  }
+  products=get('products',[]);
+  currentOrders=get('orders',[]);
+  purchases=get('purchases',[]);
+  batches=get('batches',[]);
+  bills=get('bills',[]);
+  customers=get('customers',[]);
+  reminders=get('reminders',[]);
+  suppliers=get('suppliers',[]);
+  liveStarted=false;
+  renderAll();
+} window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
 function renderMedicineCheck(){
  const r=$('mcResult'); if(!r)return;
@@ -194,6 +270,7 @@ function pickPurchaseMedicine(p){
  if($('puProductSearch'))$('puProductSearch').dataset.productFound=p?'yes':'no';
  if(p&&$('puCategory'))$('puCategory').value=p.cat||'Human Medicines';
  if($('puSchedule'))$('puSchedule').value=String(p?.schedule||'').toUpperCase().replace('SCHEDULE ','');
+ if($('puMinQty'))$('puMinQty').value=Number(p?.lowStockLevel??10);
 }
 function syncBillMedicine(){pickBillMedicine(findMedicineBySearch($('bMedicineSearch').value))}
 function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puProductSearch').value))}
@@ -233,7 +310,7 @@ window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bM
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
-window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}bill.invoiceNumber=invoiceNumber;if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
+window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
 function shopHeaderHtml(){
 return '<div style="text-align:center;border:1px solid #333;padding:12px;margin-bottom:14px"><div style="font-size:22px;font-weight:700">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</div><div>Phone: 8300363317</div><div>Drug Licence No: TN/DPI/01386/20,21<br>FSSAI Licence No: 22422039000512</div></div>'
 }
@@ -301,7 +378,7 @@ window.calculatePurchaseGst=()=>{
 window.savePurchase=async()=>{
   const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
-  const qty=Math.max(1,Number($('puQty').value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
+  const qty=Math.max(1,Number($('puQty').value)||0),minQty=Math.max(0,Number($('puMinQty')?.value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
   const gst=window.calculatePurchaseGst();
   const category=$('puCategory')?.value||product?.cat||'Human Medicines';
   const schedule=['H','H1'].includes(String($('puSchedule')?.value||'').toUpperCase())?String($('puSchedule').value).toUpperCase():'';
@@ -313,17 +390,17 @@ window.savePurchase=async()=>{
     const bid=productId+'__'+batchNumber,br=doc(db,'batches',bid),pr=doc(db,'products',productId);
     await runTransaction(db,async tx=>{const [bs,ps]=await Promise.all([tx.get(br),tx.get(pr)]);const existingProduct=ps.exists()?ps.data():{};const old=bs.exists()?bs.data():{};
      tx.set(br,{...old,id:bid,productId,productName:purchase.productName,category:purchase.category,cat:purchase.category,schedule:purchase.schedule,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
-     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:Number(existingProduct.lowStockLevel??10),purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
+     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:minQty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
      tx.set(doc(collection(db,'purchases')),{...purchase,createdAt:serverTimestamp()});
      tx.set(doc(collection(db,'stockMovements')),{type:'PURCHASE',productId,batchId:bid,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:serverTimestamp()});
     });
    }else{
-    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,price:purchase.sellingPrice,stock:0,lowStockLevel:10,active:true};products.push(product)}else{product.cat=purchase.category;product.category=purchase.category;if(purchase.schedule)product.schedule=purchase.schedule;}
+    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)}else{product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;}
     let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
     product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});purchases.unshift({...purchase,id:'PU'+Date.now()});
     const sm=get('stockMovements',[]);sm.push({id:'SM'+Date.now(),type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases)
    }
-   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell'].forEach(id=>$(id).value='');if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';renderAll()
+   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell'].forEach(id=>$(id).value='');if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';renderAll()
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
 
@@ -604,3 +681,149 @@ window.searchMedicine=()=>{};
 window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
 window.openBillViewFromButton=id=>window.viewBill(id);
 window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
+
+/* V5.9.3 - Purchase QR scanner: additive only.
+   Scans a medicine-pack QR code and auto-fills Purchase Entry fields when
+   the QR payload contains product/GTIN, batch and/or expiry information.
+   Existing Firebase collections, data and features are untouched. */
+(function(){
+  const QR_STATE={running:false,stop:null,loaded:false};
+  const pick=(...ids)=>{for(const id of ids){const el=document.getElementById(id);if(el)return el;}return null;};
+  const setVal=(id,value)=>{const el=document.getElementById(id);if(el&&value!==undefined&&value!==null&&String(value)!=='')el.value=String(value);};
+  const clean=s=>String(s??'').trim();
+  const norm=s=>clean(s).toLowerCase().replace(/\s+/g,' ');
+  function dateToInput(v){
+    let s=clean(v); if(!s)return '';
+    s=s.replace(/\//g,'-').replace(/\./g,'-');
+    let m=s.match(/^(\d{2})(\d{2})(\d{2})$/);
+    if(m){const yy=Number(m[1]),mm=m[2],dd=m[3];return String(yy+(yy>=50?1900:2000))+'-'+mm+'-'+dd;}
+    m=s.match(/^(\d{4})[-]?(\d{2})[-]?(\d{2})$/); if(m)return m[1]+'-'+m[2]+'-'+m[3];
+    m=s.match(/^(\d{2})[-](\d{2})[-](\d{4})$/); if(m)return m[3]+'-'+m[2]+'-'+m[1];
+    const d=new Date(s); return isNaN(d.getTime())?'':d.toISOString().slice(0,10);
+  }
+  function fromObject(o){
+    if(!o||typeof o!=='object')return {};
+    const lower={};Object.keys(o).forEach(k=>lower[k.toLowerCase().replace(/[^a-z0-9]/g,'')]=o[k]);
+    const first=(...keys)=>{for(const k of keys){const v=lower[k.toLowerCase().replace(/[^a-z0-9]/g,'')];if(v!==undefined&&v!==null&&clean(v)!=='')return v;}return '';};
+    return {name:first('productName','medicine','medicineName','name','itemName','description','product'),barcode:first('gtin','barcode','productCode','itemCode','code'),batch:first('batchNumber','batchNo','batch','lotNumber','lot'),expiry:first('expiryDate','expiry','expDate','exp','expiration'),mrp:first('mrp','maximumRetailPrice','maxRetailPrice'),selling:first('sellingPrice','salePrice','retailPrice'),qty:first('quantity','qty','packQuantity'),manufacturer:first('manufacturer','company','maker')};
+  }
+  function parseGS1(raw){
+    const out={}; let s=raw.replace(/\u001d/g,'|').replace(/[\r\n]+/g,'');
+    // Common GS1 Digital Link payloads may be plain AI data such as
+    // 01 + GTIN(14) + 17 + YYMMDD + 10 + batch. Parse fixed AIs first.
+    const start=s.match(/(?:^|[^0-9])01(\d{14})/);
+    if(start){
+      out.barcode=start[1];
+      const pos=start.index||0;
+      const aiOffset=(s[pos]==='0'&&s[pos+1]==='1')?16:17;
+      const tail=s.slice(pos+aiOffset);
+      const e=tail.match(/(?:^|[^0-9])17(\d{6})/); if(e)out.expiry=dateToInput(e[1]);
+      const b=tail.match(/(?:^|[^0-9])10([^|]{1,30})/); if(b)out.batch=b[1];
+      const sn=tail.match(/(?:^|[^0-9])21([^|]{1,30})/); if(sn)out.serial=sn[1];
+    }
+    const m17=s.match(/(?:^|[^0-9])17(\d{6})/); if(m17&&!out.expiry)out.expiry=dateToInput(m17[1]);
+    const m10=s.match(/(?:^|[|])10([^|]{1,30})/); if(m10&&!out.batch)out.batch=m10[1];
+    const m21=s.match(/(?:^|[|])21([^|]{1,30})/); if(m21&&!out.serial)out.serial=m21[1];
+    return out;
+  }
+  function parseUrl(raw){
+    try{
+      const u=new URL(raw); const o={};
+      u.searchParams.forEach((v,k)=>{o[k]=v});
+      if(u.hash&&u.hash.includes('='))new URLSearchParams(u.hash.slice(1)).forEach((v,k)=>o[k]=v);
+      const r=fromObject(o); if(u.pathname)r.name=r.name||''; return r;
+    }catch{return {}};
+  }
+  function parsePayload(raw){
+    raw=clean(raw); if(!raw)return {};
+    let out={};
+    try{const j=JSON.parse(raw);out=fromObject(j);}catch{}
+    const gs=parseGS1(raw); Object.keys(gs).forEach(k=>{if(gs[k])out[k]=gs[k]});
+    const url=parseUrl(raw); Object.keys(url).forEach(k=>{if(url[k])out[k]=url[k]});
+    const pairs={};
+    const re=/(?:^|[?&#|;,\n\r])\s*(productName|medicineName|medicine|name|itemName|description|gtin|barcode|productCode|itemCode|batchNumber|batchNo|batch|lotNumber|lot|expiryDate|expiry|expDate|exp|expiration|mrp|maximumRetailPrice|retailPrice|sellingPrice|salePrice|quantity|qty)\s*[:=]\s*([^&#|;,\n\r]+)/gi;
+    let m;while((m=re.exec(raw)))pairs[m[1]]=m[2];
+    const p=fromObject(pairs);Object.keys(p).forEach(k=>{if(p[k])out[k]=p[k]});
+    if(out.expiry)out.expiry=dateToInput(out.expiry);
+    if(out.barcode)out.barcode=clean(out.barcode).replace(/\D/g,'')||clean(out.barcode);
+    return out;
+  }
+  function findProductByCode(code){
+    const c=norm(code); if(!c)return null;
+    return (window.products||products||[]).find(p=>norm(p.barcode)===c||norm(p.gtin)===c)||null;
+  }
+  function purchaseElements(){return {search:pick('puProductSearch'),hidden:pick('puProduct'),batch:pick('puBatch'),expiry:pick('puExpiry'),mrp:pick('puMrp'),sell:pick('puSell'),qty:pick('puQty'),minQty:pick('puMinQty'),cost:pick('puCost'),supplier:pick('puSupplier'),category:pick('puCategory'),schedule:pick('puSchedule')};}
+  function applyPayload(raw){
+    const d=parsePayload(raw), e=purchaseElements();
+    const p=findProductByCode(d.barcode)||((d.name)?(window.findMedicineBySearch?.(d.name)||findMedicineBySearch(d.name)):null);
+    if(p){
+      e.search.value=p.name||d.name||''; e.hidden.value=p.id||'';
+      if(e.category)e.category.value=p.cat||p.category||e.category.value;
+      if(e.schedule)e.schedule.value=String(p.schedule||'').replace(/^SCHEDULE\s+/i,'').toUpperCase();
+      if(!d.mrp&&p.mrp)e.mrp.value=Number(p.mrp)||0;
+      if(!d.sell&&p.price)e.sell.value=Number(p.price)||0;
+    }else if(d.name){e.search.value=d.name;e.hidden.value='';}
+    if(d.batch)e.batch.value=clean(d.batch);
+    if(d.expiry)e.expiry.value=dateToInput(d.expiry);
+    if(d.mrp)e.mrp.value=Number(String(d.mrp).replace(/[^0-9.]/g,''))||0;
+    if(d.selling)e.sell.value=Number(String(d.selling).replace(/[^0-9.]/g,''))||0;
+    if(d.qty&&Number(d.qty)>0)e.qty.value=Math.max(1,Number(d.qty));
+    if(d.manufacturer&&!e.supplier.value)e.supplier.value=d.manufacturer;
+    if(typeof syncPurchaseMedicine==='function')syncPurchaseMedicine();
+    const missing=[];if(!d.name&&!p)missing.push('Medicine');if(!d.batch)missing.push('Batch No.');if(!d.expiry)missing.push('Expiry Date');
+    return {data:d,product:p,missing};
+  }
+  function ensureModal(){
+    if(document.getElementById('skQrModal'))return document.getElementById('skQrModal');
+    const modal=document.createElement('div');modal.id='skQrModal';modal.className='modal hidden';modal.innerHTML='<div style="padding:18px;max-height:94vh"><button id="skQrClose" class="secondary" style="float:right">✕ Close</button><h3 style="margin-top:0">📷 Scan Medicine QR Code</h3><p id="skQrStatus" class="small">Point the camera at the QR code on the medicine box.</p><div id="skQrReader" style="width:100%;max-width:520px;margin:auto"></div><div id="skQrResult" class="small" style="margin-top:10px"></div></div>';
+    document.body.appendChild(modal);
+    document.getElementById('skQrClose').onclick=close;
+    modal.addEventListener('click',e=>{if(e.target===modal)close()});
+    function close(){stop();modal.classList.add('hidden');}
+    return modal;
+  }
+  function stop(){QR_STATE.running=false;try{QR_STATE.stop?.()}catch{}QR_STATE.stop=null;const v=document.querySelector('#skQrReader video');if(v){try{v.pause()}catch{} } const r=document.getElementById('skQrReader');if(r)r.innerHTML='';}
+  async function loadFallback(){
+    if(window.Html5Qrcode)return window.Html5Qrcode;
+    if(QR_STATE.loaded)return window.Html5Qrcode||null;
+    QR_STATE.loaded=true;
+    await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';s.onload=resolve;s.onerror=()=>reject(new Error('QR scanner library could not load. Check internet connection.'));document.head.appendChild(s)});
+    return window.Html5Qrcode;
+  }
+  async function start(){
+    const modal=ensureModal(),status=document.getElementById('skQrStatus'),result=document.getElementById('skQrResult');modal.classList.remove('hidden');result.textContent='';stop();QR_STATE.running=true;
+    const onDecoded=raw=>{
+      if(!QR_STATE.running)return;QR_STATE.running=false;
+      const r=applyPayload(raw),d=r.data;
+      try{navigator.vibrate?.(100)}catch{}
+      stop();
+      const details=['QR scanned successfully.'];if(r.product)details.push('Medicine: '+r.product.name);else if(d.name)details.push('Medicine: '+d.name);if(d.barcode)details.push('Code: '+d.barcode);if(d.batch)details.push('Batch: '+d.batch);if(d.expiry)details.push('Expiry: '+d.expiry);if(r.missing.length)details.push('Not present in QR: '+r.missing.join(', '));
+      result.textContent=details.join(' • ');status.textContent=r.missing.length?'QR scanned. Fields available in the QR have been filled.':'QR scanned. Purchase fields have been filled automatically.';
+    };
+    if('BarcodeDetector' in window){
+      try{
+        const detector=new BarcodeDetector({formats:['qr_code']});
+        const video=document.createElement('video');video.setAttribute('playsinline','true');video.autoplay=true;video.muted=true;video.style.width='100%';video.style.borderRadius='18px';video.style.background='#000';document.getElementById('skQrReader').appendChild(video);
+        const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+        video.srcObject=stream;await video.play();
+        QR_STATE.stop=()=>stream.getTracks().forEach(t=>t.stop());
+        const loop=async()=>{if(!QR_STATE.running)return;try{const codes=await detector.detect(video);if(codes?.length&&codes[0].rawValue){onDecoded(codes[0].rawValue);return;}}catch{}requestAnimationFrame(loop)};requestAnimationFrame(loop);return;
+      }catch(e){stop();status.textContent='Starting camera scanner…';}
+    }
+    try{
+      const H=await loadFallback();if(!H)throw new Error('Scanner unavailable');
+      const reader=new H('skQrReader');
+      QR_STATE.stop=async()=>{try{await reader.stop()}catch{}try{reader.clear()}catch{}};
+      await reader.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:260}},onDecoded,()=>{});
+    }catch(e){QR_STATE.running=false;status.textContent='Camera scanner could not start: '+(e?.message||'Please allow camera access.');}
+  }
+  function addButton(){
+    const search=document.getElementById('puProductSearch');if(!search||document.getElementById('skPurchaseQrBtn'))return;
+    const wrap=search.closest('.searchbox')||search.parentElement;if(!wrap)return;
+    const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-top:4px';
+    const btn=document.createElement('button');btn.id='skPurchaseQrBtn';btn.type='button';btn.className='primary';btn.style.cssText='width:100%';btn.textContent='📷 Scan Medicine QR Code';btn.onclick=start;row.appendChild(btn);wrap.appendChild(row);
+    const hint=document.createElement('div');hint.className='small';hint.style.marginTop='5px';hint.textContent='Scan the QR printed on the medicine box. Batch / expiry will be filled when those values are encoded in the QR.';wrap.appendChild(hint);
+  }
+  document.addEventListener('DOMContentLoaded',addButton);setTimeout(addButton,300);setTimeout(addButton,1200);
+  window.scanPurchaseQr=start;
+})();
