@@ -233,7 +233,7 @@ window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bM
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
-window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}bill.invoiceNumber=invoiceNumber;if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
+window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
 function shopHeaderHtml(){
 return '<div style="text-align:center;border:1px solid #333;padding:12px;margin-bottom:14px"><div style="font-size:22px;font-weight:700">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</div><div>Phone: 8300363317</div><div>Drug Licence No: TN/DPI/01386/20,21<br>FSSAI Licence No: 22422039000512</div></div>'
 }
@@ -604,3 +604,149 @@ window.searchMedicine=()=>{};
 window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
 window.openBillViewFromButton=id=>window.viewBill(id);
 window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
+
+/* V5.9.3 - Purchase QR scanner: additive only.
+   Scans a medicine-pack QR code and auto-fills Purchase Entry fields when
+   the QR payload contains product/GTIN, batch and/or expiry information.
+   Existing Firebase collections, data and features are untouched. */
+(function(){
+  const QR_STATE={running:false,stop:null,loaded:false};
+  const pick=(...ids)=>{for(const id of ids){const el=document.getElementById(id);if(el)return el;}return null;};
+  const setVal=(id,value)=>{const el=document.getElementById(id);if(el&&value!==undefined&&value!==null&&String(value)!=='')el.value=String(value);};
+  const clean=s=>String(s??'').trim();
+  const norm=s=>clean(s).toLowerCase().replace(/\s+/g,' ');
+  function dateToInput(v){
+    let s=clean(v); if(!s)return '';
+    s=s.replace(/\//g,'-').replace(/\./g,'-');
+    let m=s.match(/^(\d{2})(\d{2})(\d{2})$/);
+    if(m){const yy=Number(m[1]),mm=m[2],dd=m[3];return String(yy+(yy>=50?1900:2000))+'-'+mm+'-'+dd;}
+    m=s.match(/^(\d{4})[-]?(\d{2})[-]?(\d{2})$/); if(m)return m[1]+'-'+m[2]+'-'+m[3];
+    m=s.match(/^(\d{2})[-](\d{2})[-](\d{4})$/); if(m)return m[3]+'-'+m[2]+'-'+m[1];
+    const d=new Date(s); return isNaN(d.getTime())?'':d.toISOString().slice(0,10);
+  }
+  function fromObject(o){
+    if(!o||typeof o!=='object')return {};
+    const lower={};Object.keys(o).forEach(k=>lower[k.toLowerCase().replace(/[^a-z0-9]/g,'')]=o[k]);
+    const first=(...keys)=>{for(const k of keys){const v=lower[k.toLowerCase().replace(/[^a-z0-9]/g,'')];if(v!==undefined&&v!==null&&clean(v)!=='')return v;}return '';};
+    return {name:first('productName','medicine','medicineName','name','itemName','description','product'),barcode:first('gtin','barcode','productCode','itemCode','code'),batch:first('batchNumber','batchNo','batch','lotNumber','lot'),expiry:first('expiryDate','expiry','expDate','exp','expiration'),mrp:first('mrp','maximumRetailPrice','maxRetailPrice'),selling:first('sellingPrice','salePrice','retailPrice'),qty:first('quantity','qty','packQuantity'),manufacturer:first('manufacturer','company','maker')};
+  }
+  function parseGS1(raw){
+    const out={}; let s=raw.replace(/\u001d/g,'|').replace(/[\r\n]+/g,'');
+    // Common GS1 Digital Link payloads may be plain AI data such as
+    // 01 + GTIN(14) + 17 + YYMMDD + 10 + batch. Parse fixed AIs first.
+    const start=s.match(/(?:^|[^0-9])01(\d{14})/);
+    if(start){
+      out.barcode=start[1];
+      const pos=start.index||0;
+      const aiOffset=(s[pos]==='0'&&s[pos+1]==='1')?16:17;
+      const tail=s.slice(pos+aiOffset);
+      const e=tail.match(/(?:^|[^0-9])17(\d{6})/); if(e)out.expiry=dateToInput(e[1]);
+      const b=tail.match(/(?:^|[^0-9])10([^|]{1,30})/); if(b)out.batch=b[1];
+      const sn=tail.match(/(?:^|[^0-9])21([^|]{1,30})/); if(sn)out.serial=sn[1];
+    }
+    const m17=s.match(/(?:^|[^0-9])17(\d{6})/); if(m17&&!out.expiry)out.expiry=dateToInput(m17[1]);
+    const m10=s.match(/(?:^|[|])10([^|]{1,30})/); if(m10&&!out.batch)out.batch=m10[1];
+    const m21=s.match(/(?:^|[|])21([^|]{1,30})/); if(m21&&!out.serial)out.serial=m21[1];
+    return out;
+  }
+  function parseUrl(raw){
+    try{
+      const u=new URL(raw); const o={};
+      u.searchParams.forEach((v,k)=>{o[k]=v});
+      if(u.hash&&u.hash.includes('='))new URLSearchParams(u.hash.slice(1)).forEach((v,k)=>o[k]=v);
+      const r=fromObject(o); if(u.pathname)r.name=r.name||''; return r;
+    }catch{return {}};
+  }
+  function parsePayload(raw){
+    raw=clean(raw); if(!raw)return {};
+    let out={};
+    try{const j=JSON.parse(raw);out=fromObject(j);}catch{}
+    const gs=parseGS1(raw); Object.keys(gs).forEach(k=>{if(gs[k])out[k]=gs[k]});
+    const url=parseUrl(raw); Object.keys(url).forEach(k=>{if(url[k])out[k]=url[k]});
+    const pairs={};
+    const re=/(?:^|[?&#|;,\n\r])\s*(productName|medicineName|medicine|name|itemName|description|gtin|barcode|productCode|itemCode|batchNumber|batchNo|batch|lotNumber|lot|expiryDate|expiry|expDate|exp|expiration|mrp|maximumRetailPrice|retailPrice|sellingPrice|salePrice|quantity|qty)\s*[:=]\s*([^&#|;,\n\r]+)/gi;
+    let m;while((m=re.exec(raw)))pairs[m[1]]=m[2];
+    const p=fromObject(pairs);Object.keys(p).forEach(k=>{if(p[k])out[k]=p[k]});
+    if(out.expiry)out.expiry=dateToInput(out.expiry);
+    if(out.barcode)out.barcode=clean(out.barcode).replace(/\D/g,'')||clean(out.barcode);
+    return out;
+  }
+  function findProductByCode(code){
+    const c=norm(code); if(!c)return null;
+    return (window.products||products||[]).find(p=>norm(p.barcode)===c||norm(p.gtin)===c)||null;
+  }
+  function purchaseElements(){return {search:pick('puProductSearch'),hidden:pick('puProduct'),batch:pick('puBatch'),expiry:pick('puExpiry'),mrp:pick('puMrp'),sell:pick('puSell'),qty:pick('puQty'),cost:pick('puCost'),supplier:pick('puSupplier'),category:pick('puCategory'),schedule:pick('puSchedule')};}
+  function applyPayload(raw){
+    const d=parsePayload(raw), e=purchaseElements();
+    const p=findProductByCode(d.barcode)||((d.name)?(window.findMedicineBySearch?.(d.name)||findMedicineBySearch(d.name)):null);
+    if(p){
+      e.search.value=p.name||d.name||''; e.hidden.value=p.id||'';
+      if(e.category)e.category.value=p.cat||p.category||e.category.value;
+      if(e.schedule)e.schedule.value=String(p.schedule||'').replace(/^SCHEDULE\s+/i,'').toUpperCase();
+      if(!d.mrp&&p.mrp)e.mrp.value=Number(p.mrp)||0;
+      if(!d.sell&&p.price)e.sell.value=Number(p.price)||0;
+    }else if(d.name){e.search.value=d.name;e.hidden.value='';}
+    if(d.batch)e.batch.value=clean(d.batch);
+    if(d.expiry)e.expiry.value=dateToInput(d.expiry);
+    if(d.mrp)e.mrp.value=Number(String(d.mrp).replace(/[^0-9.]/g,''))||0;
+    if(d.selling)e.sell.value=Number(String(d.selling).replace(/[^0-9.]/g,''))||0;
+    if(d.qty&&Number(d.qty)>0)e.qty.value=Math.max(1,Number(d.qty));
+    if(d.manufacturer&&!e.supplier.value)e.supplier.value=d.manufacturer;
+    if(typeof syncPurchaseMedicine==='function')syncPurchaseMedicine();
+    const missing=[];if(!d.name&&!p)missing.push('Medicine');if(!d.batch)missing.push('Batch No.');if(!d.expiry)missing.push('Expiry Date');
+    return {data:d,product:p,missing};
+  }
+  function ensureModal(){
+    if(document.getElementById('skQrModal'))return document.getElementById('skQrModal');
+    const modal=document.createElement('div');modal.id='skQrModal';modal.className='modal hidden';modal.innerHTML='<div style="padding:18px;max-height:94vh"><button id="skQrClose" class="secondary" style="float:right">✕ Close</button><h3 style="margin-top:0">📷 Scan Medicine QR Code</h3><p id="skQrStatus" class="small">Point the camera at the QR code on the medicine box.</p><div id="skQrReader" style="width:100%;max-width:520px;margin:auto"></div><div id="skQrResult" class="small" style="margin-top:10px"></div></div>';
+    document.body.appendChild(modal);
+    document.getElementById('skQrClose').onclick=close;
+    modal.addEventListener('click',e=>{if(e.target===modal)close()});
+    function close(){stop();modal.classList.add('hidden');}
+    return modal;
+  }
+  function stop(){QR_STATE.running=false;try{QR_STATE.stop?.()}catch{}QR_STATE.stop=null;const v=document.querySelector('#skQrReader video');if(v){try{v.pause()}catch{} } const r=document.getElementById('skQrReader');if(r)r.innerHTML='';}
+  async function loadFallback(){
+    if(window.Html5Qrcode)return window.Html5Qrcode;
+    if(QR_STATE.loaded)return window.Html5Qrcode||null;
+    QR_STATE.loaded=true;
+    await new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';s.onload=resolve;s.onerror=()=>reject(new Error('QR scanner library could not load. Check internet connection.'));document.head.appendChild(s)});
+    return window.Html5Qrcode;
+  }
+  async function start(){
+    const modal=ensureModal(),status=document.getElementById('skQrStatus'),result=document.getElementById('skQrResult');modal.classList.remove('hidden');result.textContent='';stop();QR_STATE.running=true;
+    const onDecoded=raw=>{
+      if(!QR_STATE.running)return;QR_STATE.running=false;
+      const r=applyPayload(raw),d=r.data;
+      try{navigator.vibrate?.(100)}catch{}
+      stop();
+      const details=['QR scanned successfully.'];if(r.product)details.push('Medicine: '+r.product.name);else if(d.name)details.push('Medicine: '+d.name);if(d.barcode)details.push('Code: '+d.barcode);if(d.batch)details.push('Batch: '+d.batch);if(d.expiry)details.push('Expiry: '+d.expiry);if(r.missing.length)details.push('Not present in QR: '+r.missing.join(', '));
+      result.textContent=details.join(' • ');status.textContent=r.missing.length?'QR scanned. Fields available in the QR have been filled.':'QR scanned. Purchase fields have been filled automatically.';
+    };
+    if('BarcodeDetector' in window){
+      try{
+        const detector=new BarcodeDetector({formats:['qr_code']});
+        const video=document.createElement('video');video.setAttribute('playsinline','true');video.autoplay=true;video.muted=true;video.style.width='100%';video.style.borderRadius='18px';video.style.background='#000';document.getElementById('skQrReader').appendChild(video);
+        const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false});
+        video.srcObject=stream;await video.play();
+        QR_STATE.stop=()=>stream.getTracks().forEach(t=>t.stop());
+        const loop=async()=>{if(!QR_STATE.running)return;try{const codes=await detector.detect(video);if(codes?.length&&codes[0].rawValue){onDecoded(codes[0].rawValue);return;}}catch{}requestAnimationFrame(loop)};requestAnimationFrame(loop);return;
+      }catch(e){stop();status.textContent='Starting camera scanner…';}
+    }
+    try{
+      const H=await loadFallback();if(!H)throw new Error('Scanner unavailable');
+      const reader=new H('skQrReader');
+      QR_STATE.stop=async()=>{try{await reader.stop()}catch{}try{reader.clear()}catch{}};
+      await reader.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:260}},onDecoded,()=>{});
+    }catch(e){QR_STATE.running=false;status.textContent='Camera scanner could not start: '+(e?.message||'Please allow camera access.');}
+  }
+  function addButton(){
+    const search=document.getElementById('puProductSearch');if(!search||document.getElementById('skPurchaseQrBtn'))return;
+    const wrap=search.closest('.searchbox')||search.parentElement;if(!wrap)return;
+    const row=document.createElement('div');row.style.cssText='display:flex;gap:8px;margin-top:4px';
+    const btn=document.createElement('button');btn.id='skPurchaseQrBtn';btn.type='button';btn.className='primary';btn.style.cssText='width:100%';btn.textContent='📷 Scan Medicine QR Code';btn.onclick=start;row.appendChild(btn);wrap.appendChild(row);
+    const hint=document.createElement('div');hint.className='small';hint.style.marginTop='5px';hint.textContent='Scan the QR printed on the medicine box. Batch / expiry will be filled when those values are encoded in the QR.';wrap.appendChild(hint);
+  }
+  document.addEventListener('DOMContentLoaded',addButton);setTimeout(addButton,300);setTimeout(addButton,1200);
+  window.scanPurchaseQr=start;
+})();
