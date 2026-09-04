@@ -11,7 +11,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-const configured=false; // PERMANENT OFFLINE MODE: no live Firebase listeners/writes.
+const configured=true; // HYBRID ONLINE: Firebase sync is enabled, but Billing saves locally first and syncs to Firebase in the background if quota/network permits.
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 async function ensureFirebase(){
@@ -44,7 +44,7 @@ async function ensureFirebase(){
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
-$('notice').innerHTML='<b>📱 Offline-first mode</b><br><span class="small">Your data is stored on this phone. Existing Firebase data will be imported once, then Firebase will remain disconnected.</span>';
+$('notice').innerHTML='<b>☁️ Online + Billing Safe mode</b><br><span class="small">Firebase sync is active. Bills are saved on this phone first, then synced to Firebase in the background. If Firebase quota/network fails, Billing continues.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
 function normalizeEmail(v){return String(v||'').trim().toLowerCase()}
@@ -85,7 +85,7 @@ window.adminLogin=async()=>{
   if(!configured){
     // Offline admin login. No network/Firebase is required for normal use.
     if((em==='admin@skmedkart.local'&&pw==='1234') || (em==='psgpgm@gmail.com'&&pw==='7200673944')){
-      loginMessage('✓ Login successful. Opening offline admin panel...','success');
+      loginMessage('✓ Login successful. Opening admin panel...','success');
       await showPanel();
       return
     }
@@ -175,27 +175,80 @@ async function migrateFirebaseOnce(){
 }
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
+const PENDING_BILLS_KEY='skm_online_pending_bills_v1';
+function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
+function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
+function pendingSaleTotals(){
+ const pb=getPendingBills(), prod=new Map(), batch=new Map();
+ for(const row of pb){if(row.stockAlreadyReserved)continue;for(const it of (row.items||[])){prod.set(it.productId,(prod.get(it.productId)||0)+Number(it.qty||0));batch.set(it.batchId,(batch.get(it.batchId)||0)+Number(it.qty||0))}}
+ return {prod,batch}
+}
+function mergePendingBills(remote){const map=new Map((remote||[]).map(b=>[String(b.id||b.invoiceNumber),b]));for(const b of getPendingBills()){const k=String(b.id||b.invoiceNumber);if(!map.has(k))map.set(k,{...b,syncStatus:'Pending Firebase sync'})}return [...map.values()].sort((a,b)=>t(b.createdAt||b.billDate)-t(a.createdAt||a.billDate))}
+function applyPendingStockOverlay(){
+ const {prod,batch}=pendingSaleTotals();
+ for(const p of products){const q=prod.get(p.id)||0;if(q)p.stock=Math.max(0,Number(p.stock||0)-q)}
+ for(const b of batches){const q=batch.get(b.id)||0;if(q)b.stock=Math.max(0,Number(b.stock||0)-q)}
+}
+let pendingSyncTimer=null,pendingSyncRunning=false;
+async function syncPendingBills(){
+ if(!configured||!db||pendingSyncRunning)return;
+ const pending=getPendingBills();if(!pending.length)return;
+ pendingSyncRunning=true;
+ try{
+  const remaining=[];
+  for(const bill of pending){
+   try{
+    const items=bill.items||[],sourceOrderId=bill.sourceOrderId||'';
+    const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
+    const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
+    if(useReservedStock){
+      await runTransaction(db,async tx=>{
+       const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');
+       const {syncStatus,stockAlreadyReserved,...cloudBill}=bill; tx.set(doc(db,'bills',bill.id),{...cloudBill,createdAt:bill.createdAt||serverTimestamp()},{merge:true});
+       if(bill.mobile)tx.set(doc(db,'customers',bill.mobile),{name:bill.customerName,mobile:bill.mobile,lastDoctor:bill.doctor,lastPurchaseDate:bill.billDate,lastBillNumber:bill.invoiceNumber,updatedAt:serverTimestamp()},{merge:true});
+       tx.update(or,{status:'Billed',billed:true,billNumber:bill.invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});
+      });
+    }else{
+      const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];
+      await runTransaction(db,async tx=>{
+       const brs=batchIds.map(id=>doc(db,'batches',id)),prs=productIds.map(id=>doc(db,'products',id));
+       const snaps=await Promise.all([...brs,...prs].map(r=>tx.get(r)));const bm=new Map(),pm=new Map();brs.forEach((r,i)=>bm.set(r.id,snaps[i]));prs.forEach((r,i)=>pm.set(r.id,snaps[brs.length+i]));
+       const bq=new Map(),pq=new Map();for(const it of items){bq.set(it.batchId,(bq.get(it.batchId)||0)+Number(it.qty||0));pq.set(it.productId,(pq.get(it.productId)||0)+Number(it.qty||0))}
+       for(const [id,q] of bq){const snap=bm.get(id);if(!snap?.exists())throw Error('Batch not found.');const d=snap.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<q)throw Error('Insufficient stock in batch '+d.batchNumber)}
+       for(const [id,q] of pq){const snap=pm.get(id);if(!snap?.exists())throw Error('Product not found.');if(Number(snap.data().stock||0)<q)throw Error('Product stock mismatch. Please check purchase/stock.')}
+       for(const [id,q] of bq){const snap=bm.get(id);tx.update(doc(db,'batches',id),{stock:Number(snap.data().stock||0)-q,updatedAt:serverTimestamp()})}
+       for(const [id,q] of pq){const snap=pm.get(id);tx.update(doc(db,'products',id),{stock:Number(snap.data().stock||0)-q,updatedAt:serverTimestamp()})}
+       for(const it of items)tx.set(doc(db,'stockMovements',bill.id+'_'+it.batchId),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:bill.invoiceNumber,createdAt:serverTimestamp()},{merge:true});
+       const {syncStatus,stockAlreadyReserved,...cloudBill}=bill; tx.set(doc(db,'bills',bill.id),{...cloudBill,createdAt:bill.createdAt||serverTimestamp()},{merge:true});
+       if(bill.mobile)tx.set(doc(db,'customers',bill.mobile),{name:bill.customerName,mobile:bill.mobile,lastDoctor:bill.doctor,lastPurchaseDate:bill.billDate,lastBillNumber:bill.invoiceNumber,updatedAt:serverTimestamp()},{merge:true});
+      });
+    }
+   }catch(err){remaining.push(bill);console.warn('Pending bill sync failed:',err)}
+  }
+  setPendingBills(remaining);
+  if(remaining.length){const n=$('notice');if(n)n.innerHTML='<b>☁️ Online + Billing Safe mode</b><br><span class="small">'+remaining.length+' bill(s) saved safely on this phone and waiting for Firebase sync. Billing remains available.</span>'}else{const n=$('notice');if(n)n.innerHTML='<b>☁️ Online + Billing Safe mode</b><br><span class="small">Firebase sync is active. Bills are saved on this phone first and synced automatically.</span>'}
+ }finally{pendingSyncRunning=false;renderAll()}
+}
+function schedulePendingBillSync(){clearTimeout(pendingSyncTimer);pendingSyncTimer=setTimeout(()=>syncPendingBills().catch(console.error),1200)}
+window.addEventListener('online',schedulePendingBillSync);
+setInterval(()=>{if(navigator.onLine)syncPendingBills().catch(console.error)},60000);
+
 async function loadAll(force=false){
-  if(force && localStorage.getItem('skm_offline_migration_v1_done')!=='yes'){
-    await migrateFirebaseOnce();
-  } else if(force){
-    renderAll();
-    return
-  }
-  // First successful launch performs exactly one Firestore read-only migration.
-  if(localStorage.getItem('skm_offline_migration_v1_done')!=='yes'){
-    await migrateFirebaseOnce();
-  }
-  products=get('products',[]);
-  currentOrders=get('orders',[]);
-  purchases=get('purchases',[]);
-  batches=get('batches',[]);
-  bills=get('bills',[]);
-  customers=get('customers',[]);
-  reminders=get('reminders',[]);
-  suppliers=get('suppliers',[]);
-  liveStarted=false;
-  renderAll();
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);renderAll();return}
+ if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
+ if(force){location.reload();return}
+ if(!db)await ensureFirebase();
+ liveStarted=true;
+ const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));if(name==='bills')bills=mergePendingBills(bills);if(name==='products'||name==='batches')applyPendingStockOverlay();renderAll();schedulePendingBillSync()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync issue</b><br><span class="small">Billing remains available; local changes are retained and will retry automatically.</span>'});
+ listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+ listen('products',v=>{products=v;applyPendingStockOverlay()});
+ listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+ listen('batches',v=>{batches=v;applyPendingStockOverlay()});
+ listen('bills',v=>{bills=mergePendingBills(v)});
+ listen('customers',v=>customers=v);
+ listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));
+ listen('suppliers',v=>suppliers=v);
+ schedulePendingBillSync();
 } window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
 function renderMedicineCheck(){
@@ -311,7 +364,32 @@ window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bM
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
-window.saveBill=async()=>{if(!billCart.length)return alert('Add at least one item.');const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();let invoiceNumber='';const items=billCart.map(x=>({...x}));const bill={invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||''};const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;const useReservedStock=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);try{if(configured){const snap=await getDocs(collection(db,'bills'));let max=0;snap.docs.forEach(d=>{const n=String(d.data()?.invoiceNumber||'').match(/^SKM-(\d+)$/);if(n)max=Math.max(max,Number(n[1])||0)});invoiceNumber='SKM-'+String(max+1).padStart(3,'0')}else{const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0')}bill.invoiceNumber=invoiceNumber;if(configured){if(useReservedStock){await runTransaction(db,async tx=>{const or=doc(db,'orders',sourceOrderId),os=await tx.get(or);if(!os.exists())throw Error('Order not found.');const live=os.data();if(live.stockRestored)throw Error('This order stock was restored after cancellation.');tx.set(doc(collection(db,'bills')),{...bill,usedReservedOrderStock:true,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true});tx.update(or,{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),stockConsumed:true,updatedAt:serverTimestamp()});});}else{const batchIds=[...new Set(items.map(x=>x.batchId))],productIds=[...new Set(items.map(x=>x.productId))];await runTransaction(db,async tx=>{const batchRefs=batchIds.map(id=>doc(db,'batches',id)),productRefs=productIds.map(id=>doc(db,'products',id));const snaps=await Promise.all([...batchRefs,...productRefs].map(r=>tx.get(r)));const batchMap=new Map(),prodMap=new Map();batchRefs.forEach((r,i)=>batchMap.set(r.id,snaps[i]));productRefs.forEach((r,i)=>prodMap.set(r.id,snaps[batchRefs.length+i]));const batchQty=new Map(),prodQty=new Map();for(const it of items){batchQty.set(it.batchId,(batchQty.get(it.batchId)||0)+it.qty);prodQty.set(it.productId,(prodQty.get(it.productId)||0)+it.qty)}for(const [id,qty] of batchQty){const s=batchMap.get(id);if(!s?.exists())throw Error('Batch not found.');const d=s.data();if(expiryStatus(d)==='EXPIRED')throw Error('Expired batch: '+d.batchNumber);if(Number(d.stock||0)<qty)throw Error('Insufficient stock in batch '+d.batchNumber)}for(const [id,qty] of prodQty){const s=prodMap.get(id);if(!s?.exists())throw Error('Product not found.');if(Number(s.data().stock||0)<qty)throw Error('Product stock mismatch. Please check purchase/stock.')}for(const [id,qty] of batchQty){const s=batchMap.get(id);tx.update(doc(db,'batches',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const [id,qty] of prodQty){const s=prodMap.get(id);tx.update(doc(db,'products',id),{stock:Number(s.data().stock||0)-qty,updatedAt:serverTimestamp()})}for(const it of items)tx.set(doc(collection(db,'stockMovements')),{type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:serverTimestamp()});tx.set(doc(collection(db,'bills')),{...bill,createdAt:serverTimestamp()});if(mobile)tx.set(doc(db,'customers',mobile),{name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber,updatedAt:serverTimestamp()},{merge:true})})}}else{for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||b.stock<it.qty||p.stock<it.qty)throw Error('Insufficient stock');b.stock-=it.qty;p.stock-=it.qty}bill.id='B'+Date.now();bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push(...items.map(it=>({id:'SM'+Date.now()+Math.random(),type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-it.qty,reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}}if(sourceOrderId){try{if(configured){await updateDoc(doc(db,'orders',sourceOrderId),{status:'Billed',billed:true,billNumber:invoiceNumber,billedAt:serverTimestamp(),updatedAt:serverTimestamp()});}else{const o=currentOrders.find(x=>x.id===sourceOrderId);if(o){o.status='Billed';o.billed=true;o.billNumber=invoiceNumber;o.billedAt=new Date().toISOString();set('orders',currentOrders);}}}catch(orderErr){console.warn('Bill saved, but order status update failed:',orderErr.message)}}alert('Bill saved: '+invoiceNumber);billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill)}catch(e){alert('Could not save bill: '+e.message)}};
+window.saveBill=async()=>{
+ if(!billCart.length)return alert('Add at least one item.');
+ const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();
+ const items=billCart.map(x=>({...x}));
+ const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});
+ const pending=getPendingBills();for(const b of pending){const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);if(m)nums.push(Number(m[1])||0)}
+ const invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0');
+ const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Pending Firebase sync'};
+ const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
+ const stockAlreadyReserved=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
+ bill.stockAlreadyReserved=stockAlreadyReserved;
+ try{
+  for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||Number(b.stock||0)<Number(it.qty||0)||Number(p.stock||0)<Number(it.qty||0))throw Error('Insufficient stock')}
+  if(!stockAlreadyReserved){for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);b.stock=Number(b.stock||0)-Number(it.qty||0);p.stock=Number(p.stock||0)-Number(it.qty||0)}}
+  bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
+  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
+  if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
+  setPendingBills([...getPendingBills(),bill]);
+  bill.syncStatus='Pending Firebase sync';
+  renderAll();
+  schedulePendingBillSync();
+  alert('Bill saved: '+invoiceNumber+(navigator.onLine?'\nFirebase sync will happen automatically.':'\nSaved safely offline. It will sync when internet is available.'));
+  billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill);
+ }catch(e){alert('Could not save bill: '+e.message)}
+};
+
 function shopHeaderHtml(){
 return '<div style="text-align:center;border:1px solid #333;padding:12px;margin-bottom:14px"><div style="font-size:22px;font-weight:700">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu</div><div>Phone: 8300363317</div><div>Drug Licence No: TN/DPI/01386/20,21<br>FSSAI Licence No: 22422039000512</div></div>'
 }
