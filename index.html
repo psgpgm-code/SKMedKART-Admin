@@ -31,7 +31,7 @@
 </main>
 <nav id="bottomNav" class="hidden"><button class="tab active" data-view="home"><span class="navicon">🏠</span>Home</button><button class="tab" data-view="billing"><span class="navicon">🧾</span>Billing</button><button class="tab" data-view="reports"><span class="navicon">📊</span>Reports</button><button class="tab" data-view="stock"><span class="navicon">💊</span>Stock</button><button class="tab" data-view="settings"><span class="navicon">⚙️</span>Settings</button></nav>
 <div id="billModal" class="modal hidden"><div><button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><div id="billModalContent"></div></div></div>
-<script type="module" src="admin.js?v=5.9.13-hybrid-bill-safe"></script>
+<script type="module" src="admin.js?v=5.9.14-hybrid-signature"></script>
 <script>
 let deferredPrompt=null;window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredPrompt=e;document.getElementById('installAppBtn').style.display='block'});document.getElementById('installAppBtn').addEventListener('click',async()=>{if(!deferredPrompt)return;deferredPrompt.prompt();await deferredPrompt.userChoice;deferredPrompt=null;document.getElementById('installAppBtn').style.display='none'});if('serviceWorker' in navigator)window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 </script>
