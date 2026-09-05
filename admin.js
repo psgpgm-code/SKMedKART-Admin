@@ -242,13 +242,13 @@ async function loadAll(force=false){
  const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));if(name==='bills')bills=mergePendingBills(bills);if(name==='products'||name==='batches')applyPendingStockOverlay();renderAll();schedulePendingBillSync()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync issue</b><br><span class="small">Billing remains available; local changes are retained and will retry automatically.</span>'});
  listen('orders',v=>currentOrders=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
  listen('products',v=>{products=v;applyPendingStockOverlay()});
- listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
+ listen('purchases',v=>{purchases=mergePendingPurchases(v);schedulePendingPurchaseSync()});
  listen('batches',v=>{batches=v;applyPendingStockOverlay()});
  listen('bills',v=>{bills=mergePendingBills(v)});
  listen('customers',v=>customers=v);
  listen('reminders',v=>reminders=v.sort((a,b)=>t(a.reminderDate)-t(b.reminderDate)));
  listen('suppliers',v=>suppliers=v);
- schedulePendingBillSync();
+ schedulePendingBillSync();schedulePendingPurchaseSync();
 } window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
 function renderMedicineCheck(){
@@ -455,6 +455,41 @@ window.calculatePurchaseGst=()=>{
   return {base,rate,total};
 };
 ['puCost','puGst'].forEach(id=>$(id)?.addEventListener('input',window.calculatePurchaseGst));
+const PENDING_PURCHASES_KEY='skm_online_pending_purchases_v1';
+function getPendingPurchases(){return get(PENDING_PURCHASES_KEY,[])}
+function setPendingPurchases(v){set(PENDING_PURCHASES_KEY,v)}
+function mergePendingPurchases(remote){const map=new Map((remote||[]).map(x=>[String(x.id||''),x]));for(const x of getPendingPurchases()){const k=String(x.id||'');if(k&&!map.has(k))map.set(k,{...x,syncStatus:'Pending Firebase sync'})}return [...map.values()].sort((a,b)=>t(b.createdAt||b.purchaseDate)-t(a.createdAt||a.purchaseDate))}
+let pendingPurchaseSyncTimer=null,pendingPurchaseSyncRunning=false;
+async function syncPendingPurchases(){
+ if(!configured||!db||pendingPurchaseSyncRunning)return;
+ const pending=getPendingPurchases();if(!pending.length)return;
+ pendingPurchaseSyncRunning=true;
+ try{
+  const remaining=[];
+  for(const purchase of pending){
+   try{
+    const productId=purchase.productId,bid=productId+'__'+purchase.batchNumber;
+    await runTransaction(db,async tx=>{
+      const purRef=doc(db,'purchases',purchase.id),pr=doc(db,'products',productId),br=doc(db,'batches',bid);
+      const [purSnap,ps,bs]=await Promise.all([tx.get(purRef),tx.get(pr),tx.get(br)]);
+      if(purSnap.exists())return;
+      const existingProduct=ps.exists()?ps.data():{};
+      const old=bs.exists()?bs.data():{};
+      tx.set(br,{...old,id:bid,productId,productName:purchase.productName,category:purchase.category,cat:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,batchNumber:purchase.batchNumber,expiryDate:purchase.expiryDate,stock:Number(old.stock||0)+Number(purchase.qty||0),purchasePrice:Number(purchase.purchasePrice||0),purchaseGstRate:Number(purchase.purchaseGstRate||0),purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),mrp:Number(purchase.mrp||0),sellingPrice:Number(purchase.sellingPrice||0),updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
+      tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer||existingProduct.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||existingProduct.manufacturerDetails||'',price:Number(purchase.sellingPrice||existingProduct.price||0),stock:Number(existingProduct.stock||0)+Number(purchase.qty||0),lowStockLevel:Number(purchase.minQty||existingProduct.lowStockLevel||0),purchasePrice:Number(purchase.purchasePrice||0),purchaseGstRate:Number(purchase.purchaseGstRate||0),purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),mrp:Number(purchase.mrp||0),gst:Number(purchase.purchaseGstRate||0),active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
+      tx.set(purRef,{...purchase,createdAt:purchase.createdAt||serverTimestamp()},{merge:true});
+      tx.set(doc(db,'stockMovements',purchase.id+'_SM'),{type:'PURCHASE',productId,batchId:bid,batchNumber:purchase.batchNumber,qty:Number(purchase.qty||0),reference:purchase.invoice||'PURCHASE',purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),createdAt:serverTimestamp()},{merge:true});
+    });
+   }catch(err){remaining.push(purchase);console.warn('Pending purchase sync failed:',err)}
+  }
+  setPendingPurchases(remaining);
+  const n=$('notice');if(n)n.innerHTML=remaining.length?'<b>☁️ Online + Billing Safe mode</b><br><span class="small">'+remaining.length+' purchase(s) saved safely on this phone and waiting for Firebase sync. Purchase entry remains available.</span>':'<b>☁️ Online + Billing Safe mode</b><br><span class="small">Firebase sync is active. Bills and purchases are saved on this phone first and synced automatically.</span>';
+ }finally{pendingPurchaseSyncRunning=false;renderAll()}
+}
+function schedulePendingPurchaseSync(){clearTimeout(pendingPurchaseSyncTimer);pendingPurchaseSyncTimer=setTimeout(()=>syncPendingPurchases().catch(console.error),1200)}
+window.addEventListener('online',schedulePendingPurchaseSync);
+setInterval(()=>{if(navigator.onLine)syncPendingPurchases().catch(console.error)},60000);
+
 window.savePurchase=async()=>{
   const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
@@ -464,23 +499,20 @@ window.savePurchase=async()=>{
   const schedule=['H','H1'].includes(String($('puSchedule')?.value||'').toUpperCase())?String($('puSchedule').value).toUpperCase():'';
   if(!typedName||!batchNumber||!expiryDate||!qty)return alert('Complete Medicine Name, Batch No., Expiry Date and Purchase Qty.');
   const productId=product?.id||('product_'+uid());
-  const purchase={productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0)};
+  const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
   try{
-   if(configured){
-    const bid=productId+'__'+batchNumber,br=doc(db,'batches',bid),pr=doc(db,'products',productId);
-    await runTransaction(db,async tx=>{const [bs,ps]=await Promise.all([tx.get(br),tx.get(pr)]);const existingProduct=ps.exists()?ps.data():{};const old=bs.exists()?bs.data():{};
-     tx.set(br,{...old,id:bid,productId,productName:purchase.productName,category:purchase.category,cat:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,batchNumber,expiryDate,stock:Number(old.stock||0)+qty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
-     tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer||existingProduct.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||existingProduct.manufacturerDetails||'',price:purchase.sellingPrice||Number(existingProduct.price||0),stock:Number(existingProduct.stock||0)+qty,lowStockLevel:minQty,purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate,active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
-     tx.set(doc(collection(db,'purchases')),{...purchase,createdAt:serverTimestamp()});
-     tx.set(doc(collection(db,'stockMovements')),{type:'PURCHASE',productId,batchId:bid,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:serverTimestamp()});
-    });
-   }else{
-    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)}else{product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails});}
-    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
-    product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{manufacturer:purchase.manufacturer||product.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||product.manufacturerDetails||'',purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});purchases.unshift({...purchase,id:'PU'+Date.now()});
-    const sm=get('stockMovements',[]);sm.push({id:'SM'+Date.now(),type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases)
-   }
-   alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.');['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>$(id).value='');if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';renderAll()
+    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)}
+    else{product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails})}
+    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber);
+    if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst}
+    else{b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    product.stock=Number(product.stock||0)+qty;if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{manufacturer:purchase.manufacturer||product.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||product.manufacturerDetails||'',purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});
+    purchases.unshift(purchase);
+    const sm=get('stockMovements',[]);sm.push({id:purchase.id+'_SM',type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});
+    set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]);
+    renderAll();schedulePendingPurchaseSync();
+    alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically. '+(navigator.onLine?'Firebase sync will happen automatically.':'Saved safely offline. It will sync when internet is available.'));
+    ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>$(id).value='');if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';renderAll()
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
 
