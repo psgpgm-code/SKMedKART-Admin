@@ -401,80 +401,93 @@ function buildInvoiceHtml(b,assets){const rows=(b.items||[]).map((i,n)=>'<tr><td
 async function billHtml(b){const assets=await invoiceAssets();return buildInvoiceHtml(b,assets)}
 window.printBill=async id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return alert('Bill not found.');const html=await billHtml(b);let frame=document.getElementById('printFrame');if(frame)frame.remove();frame=document.createElement('iframe');frame.id='printFrame';frame.style.position='fixed';frame.style.width='1px';frame.style.height='1px';frame.style.border='0';frame.style.opacity='0';document.body.appendChild(frame);const docx=frame.contentDocument||frame.contentWindow.document;docx.open();docx.write(html);docx.close();frame.onload=()=>setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){const w=window.open('','_blank');if(!w)return alert('Please allow popups for printing.');w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300)}},200)};
 async function pdfBlob(b){
-  // Direct PDF generation: avoids Android foreignObject/canvas PDF failures.
+  // Valid, self-contained PDF writer. Keep this function isolated so the rest of the app is unchanged.
   const assets=await invoiceAssets();
   const enc=new TextEncoder();
   const B=x=>enc.encode(String(x));
-  const escPdf=s=>String(s??'').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)').replace(/\r?\n/g,' ');
-  const money2=v=>'₹'+Number(v||0).toFixed(2);
-  const lines=[];
+  const esc=s=>String(s??'').replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)').replace(/\r?\n/g,' ');
+  const rs=v=>'Rs.'+Number(v||0).toFixed(2);
   const W=595,H=842;
-  const cmds=['q 0 0 0 rg'];
-  function text(x,y,size,str,bold=false){cmds.push(`BT /F${bold?'2':'1'} ${size} Tf ${x} ${y} Td (${escPdf(str)}) Tj ET`)}
-  function rect(x,y,w,h,fill){cmds.push(`${fill} rg ${x} ${y} ${w} ${h} re f`)}
-  function line(x1,y1,x2,y2){cmds.push(`0.4 w 0 0 0 RG ${x1} ${y1} m ${x2} ${y2} l S`)}
-  // Border/header
-  cmds.push('0.12 0.35 0.65 RG 1 w 10 10 575 822 re S');
-  text(35,792,20,'Sri Krishna Medicals',true);
-  text(35,775,9,'Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu - 636 810');
-  text(35,761,9,'Phone: 8300363317');
-  text(35,747,9,'Drug Licence No: TN/DPI/01386/2021');
-  text(35,733,9,'FSSAI Licence No: 22422039000512');
-  rect(390,768,170,34,'0.87 0.94 1'); text(405,781,15,'Invoice '+(b.invoiceNumber||'-'),true);
+  const content=[];
+  const text=(x,y,size,str,bold=false)=>content.push(`BT /F${bold?2:1} ${size} Tf ${x} ${y} Td (${esc(str)}) Tj ET`);
+  const line=(x1,y1,x2,y2)=>content.push(`0.4 w 0 0 0 RG ${x1} ${y1} m ${x2} ${y2} l S`);
+  const fill=(x,y,w,h,r,g,bl)=>content.push(`${r} ${g} ${bl} rg ${x} ${y} ${w} ${h} re f`);
+  content.push('q');
+  content.push('0.04 0.35 0.65 RG 1 w 10 10 575 822 re S');
+  text(115,792,20,'Sri Krishna Medicals',true);
+  text(115,776,9,'Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu - 636 810');
+  text(115,762,9,'Phone: 8300363317');
+  text(115,748,9,'Drug Licence No: TN/DPI/01386/2021');
+  text(115,734,9,'FSSAI Licence No: 22422039000512');
+  fill(390,768,170,34,0.87,0.94,1); text(405,781,15,'Invoice '+(b.invoiceNumber||'-'),true);
   text(390,752,9,'Date: '+(b.billDate||'-')); text(390,738,9,'Customer: '+(b.customerName||'Walk-in Customer'));
   text(390,724,9,'Mobile: '+(b.mobile||'-')); text(390,710,9,'Prescribed By: '+(b.doctor||'-'));
   line(25,700,570,700);
   const cols=[25,65,220,315,395,435,505,570];
-  rect(25,674,545,26,'0.87 0.94 1');
-  ['S.No','Medicine','Manufacturer','Batch','Qty','Rate (₹)','Amount (₹)'].forEach((h,i)=>text(cols[i]+3,683,7,h,true));
+  fill(25,674,545,26,0.87,0.94,1);
+  ['S.No','Medicine','Manufacturer','Batch','Qty','Rate (Rs.)','Amount (Rs.)'].forEach((h,i)=>text(cols[i]+3,683,7,h,true));
   cols.slice(1,-1).forEach(x=>line(x,674,x,700));
   let y=658;
   (b.items||[]).forEach((i,n)=>{
     const m=window.itemManufacturer?window.itemManufacturer(i):((i.manufacturer||i.manufacturerDetails)||'-');
     const name=String(i.name||i.productName||'-');
-    const vals=[String(n+1),name.slice(0,28),String(m||'-').slice(0,16),String(i.batchNumber||'-').slice(0,14),String(i.qty||0),Number(i.price||0).toFixed(2),Number(i.qty||0)*Number(i.price||0).toFixed(2)];
+    const amount=Number(i.qty||0)*Number(i.price||0);
+    const vals=[String(n+1),name.slice(0,28),String(m||'-').slice(0,16),String(i.batchNumber||'-').slice(0,14),String(i.qty||0),Number(i.price||0).toFixed(2),amount.toFixed(2)];
     vals.forEach((v,j)=>text(cols[j]+3,y,7,String(v),false));
     line(25,y-6,570,y-6); cols.slice(1,-1).forEach(x=>line(x,y+7,x,y-6)); y-=24;
   });
   const totalY=Math.max(y-10,430);
-  text(35,totalY,10,'Subtotal : '+money2(b.subtotal),true);
-  text(35,totalY-17,10,'Discount : '+money2(b.discount),true);
-  text(35,totalY-34,10,'GST : '+money2(b.gst),true);
-  rect(25,totalY-67,300,25,'0.87 0.94 1'); text(35,totalY-58,13,'Grand Total : '+money2(b.grandTotal),true);
+  text(35,totalY,10,'Subtotal : '+rs(b.subtotal),true);
+  text(35,totalY-17,10,'Discount : '+rs(b.discount),true);
+  text(35,totalY-34,10,'GST : '+rs(b.gst),true);
+  fill(25,totalY-67,300,25,0.87,0.94,1); text(35,totalY-58,13,'Grand Total : '+rs(b.grandTotal),true);
   text(35,totalY-84,10,'Payment Mode : '+(b.paymentMode||'-'),true);
   text(35,totalY-101,10,'Note : '+(b.note||'-'),true);
-  // Signature line and footer area
   text(420,totalY-82,8,'Pharmacist Signature'); line(400,totalY-70,565,totalY-70);
-  const footerY=28; rect(10,footerY,575,42,'0.05 0.28 0.55');
+  const footerY=28; fill(10,footerY,575,42,0.05,0.28,0.55);
   text(25,footerY+27,8,'Thank you for purchasing  |  Order through WhatsApp by using SKMedKART app',false);
   text(25,footerY+12,7,'Your Health, Our Priority',false);
-  // Images are added below through PDF XObjects.
-  cmds.push('Q');
-  async function imgBytes(src,maxW,maxH){
+  content.push('Q');
+
+  async function imgBytes(src){
     const im=await new Promise((res,rej)=>{const x=new Image();x.onload=()=>res(x);x.onerror=()=>rej(new Error('Could not load invoice image'));x.src=src});
-    const c=document.createElement('canvas'); c.width=Math.max(1,Math.min(800,im.naturalWidth||400)); c.height=Math.max(1,Math.min(800,im.naturalHeight||300));
+    const c=document.createElement('canvas');
+    const scale=Math.min(1,800/Math.max(im.naturalWidth||400,im.naturalHeight||300));
+    c.width=Math.max(1,Math.round((im.naturalWidth||400)*scale)); c.height=Math.max(1,Math.round((im.naturalHeight||300)*scale));
     const cx=c.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,c.width,c.height); cx.drawImage(im,0,0,c.width,c.height);
-    const d=c.toDataURL('image/jpeg',0.88).split(',')[1],raw=atob(d),u=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);return {u,w:c.width,h:c.height};
+    const raw=atob(c.toDataURL('image/jpeg',0.88).split(',')[1]);
+    const u=new Uint8Array(raw.length); for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);
+    return {u,w:c.width,h:c.height};
   }
-  const top=await imgBytes(assets.topLogo); const sig=await imgBytes(assets.signature); const foot=await imgBytes(assets.footerLogo);
-  cmds.splice(1,0,`q 25 738 70 55 cm /Im1 Do Q`, `q 400 ${Math.max(430,totalY-68)} 155 58 cm /Im2 Do Q`, `q 455 ${footerY+4} 115 34 cm /Im3 Do Q`);
-  const content=B(cmds.join('\n'));
-  const objs={};
+  const top=await imgBytes(assets.topLogo), sig=await imgBytes(assets.signature), foot=await imgBytes(assets.footerLogo);
+  content.unshift('q 25 738 70 55 cm /Im1 Do Q');
+  content.unshift(`q 400 ${Math.max(430,totalY-68)} 155 58 cm /Im2 Do Q`);
+  content.unshift(`q 455 ${footerY+4} 115 34 cm /Im3 Do Q`);
+  const stream=B(content.join('\n'));
+
+  const objs=[];
   objs[1]=B('<< /Type /Catalog /Pages 2 0 R >>');
   objs[2]=B('<< /Type /Pages /Kids [3 0 R] /Count 1 >>');
   objs[3]=B('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 6 0 R /F2 7 0 R >> /XObject << /Im1 4 0 R /Im2 5 0 R /Im3 8 0 R >> >> /Contents 9 0 R >>');
-  function imageObj(im){return B('<< /Type /XObject /Subtype /Image /Width '+im.w+' /Height '+im.h+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+im.u.length+' >>\nstream\n')}
-  objs[4]=imageObj(top); objs[5]=imageObj(sig); objs[8]=imageObj(foot);
-  objs[6]=B('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>'); objs[7]=B('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>'); objs[9]=B('<< /Length '+content.length+' >>\nstream\n');
-  const chunks=[B('%PDF-1.4\n')],offs=[0];let pos=chunks[0].length;
-  function addObj(n,pre,bytes,tail){const h=B(n+' 0 obj\n');offs[n]=pos;chunks.push(h,bytes,tail?B(tail):B('\nendobj\n'));pos+=h.length+bytes.length+(tail?B(tail).length:B('\nendobj\n').length)}
-  addObj(1,'',objs[1]); addObj(2,'',objs[2]); addObj(3,'',objs[3]);
-  addObj(4,'',objs[4]); chunks.push(top.u,B('\nendstream\nendobj\n'));pos+=top.u.length+B('\nendstream\nendobj\n').length;
-  addObj(5,'',objs[5]); chunks.push(sig.u,B('\nendstream\nendobj\n'));pos+=sig.u.length+B('\nendstream\nendobj\n').length;
-  addObj(6,'',objs[6]); addObj(7,'',objs[7]);
-  addObj(8,'',objs[8]); chunks.push(foot.u,B('\nendstream\nendobj\n'));pos+=foot.u.length+B('\nendstream\nendobj\n').length;
-  addObj(9,'',objs[9]); chunks.push(content,B('\nendstream\nendobj\n'));pos+=content.length+B('\nendstream\nendobj\n').length;
-  const xref=pos; let x='xref\n0 10\n0000000000 65535 f \n'; for(let n=1;n<=9;n++)x+=String(offs[n]).padStart(10,'0')+' 00000 n \n'; x+='trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF'; chunks.push(B(x));
+  objs[4]=B('<< /Type /XObject /Subtype /Image /Width '+top.w+' /Height '+top.h+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+top.u.length+' >>\nstream\n');
+  objs[5]=B('<< /Type /XObject /Subtype /Image /Width '+sig.w+' /Height '+sig.h+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+sig.u.length+' >>\nstream\n');
+  objs[6]=B('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
+  objs[7]=B('<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
+  objs[8]=B('<< /Type /XObject /Subtype /Image /Width '+foot.w+' /Height '+foot.h+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+foot.u.length+' >>\nstream\n');
+  objs[9]=B('<< /Length '+stream.length+' >>\nstream\n');
+
+  const chunks=[B('%PDF-1.4\n')];
+  const offs=new Array(10).fill(0); let pos=chunks[0].length;
+  const addSimple=(n,body)=>{const h=B(n+' 0 obj\n');offs[n]=pos;chunks.push(h,body,B('\nendobj\n'));pos+=h.length+body.length+B('\nendobj\n').length};
+  const addImage=(n,dict,img)=>{const h=B(n+' 0 obj\n');const tail=B('\nendstream\nendobj\n');offs[n]=pos;chunks.push(h,dict,img.u,tail);pos+=h.length+dict.length+img.u.length+tail.length};
+  const addStream=(n,dict,data)=>{const h=B(n+' 0 obj\n');const tail=B('\nendstream\nendobj\n');offs[n]=pos;chunks.push(h,dict,data,tail);pos+=h.length+dict.length+data.length+tail.length};
+  addSimple(1,objs[1]); addSimple(2,objs[2]); addSimple(3,objs[3]);
+  addImage(4,objs[4],top); addImage(5,objs[5],sig);
+  addSimple(6,objs[6]); addSimple(7,objs[7]); addImage(8,objs[8],foot); addStream(9,objs[9],stream);
+  const xref=pos; let x='xref\n0 10\n0000000000 65535 f \n';
+  for(let n=1;n<=9;n++)x+=String(offs[n]).padStart(10,'0')+' 00000 n \n';
+  x+='trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF';
+  chunks.push(B(x));
   return new Blob(chunks,{type:'application/pdf'});
 }
 window.saveBillPdf=async id=>{const b=findBill(id);if(!b)return;try{const blob=await pdfBlob(b);const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=b.invoiceNumber+'.pdf';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}catch(e){alert('Could not create PDF: '+e.message)}};
