@@ -409,7 +409,7 @@ async function pdfBlob(b){
   const rs=v=>'Rs.'+Number(v||0).toFixed(2);
   const W=595,H=842;
   const content=[];
-  const text=(x,y,size,str,bold=false)=>content.push(`BT /F${bold?2:1} ${size} Tf ${x} ${y} Td (${esc(str)}) Tj ET`);
+  const text=(x,y,size,str,bold=false,color='0 0 0')=>content.push(`${color} rg BT /F${bold?2:1} ${size} Tf ${x} ${y} Td (${esc(str)}) Tj ET`);
   const line=(x1,y1,x2,y2)=>content.push(`0.4 w 0 0 0 RG ${x1} ${y1} m ${x2} ${y2} l S`);
   const fill=(x,y,w,h,r,g,bl)=>content.push(`${r} ${g} ${bl} rg ${x} ${y} ${w} ${h} re f`);
   content.push('q');
@@ -445,8 +445,8 @@ async function pdfBlob(b){
   text(35,totalY-101,10,'Note : '+(b.note||'-'),true);
   text(420,totalY-82,8,'Pharmacist Signature'); line(400,totalY-70,565,totalY-70);
   const footerY=28; fill(10,footerY,575,42,0.05,0.28,0.55);
-  text(25,footerY+27,8,'Thank you for purchasing  |  Order through WhatsApp by using SKMedKART app',false);
-  text(25,footerY+12,7,'Your Health, Our Priority',false);
+  text(25,footerY+27,8,'Thank you for purchasing  |  Order through WhatsApp by using SKMedKART app',false,'1 1 1');
+  text(25,footerY+12,7,'Your Health, Our Priority',false,'1 1 1');
   content.push('Q');
 
   async function imgBytes(src){
