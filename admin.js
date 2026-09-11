@@ -122,15 +122,34 @@ window.adminLogout=()=>{
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 // Stock + Billing only: online customer orders, order listeners, reports and reminders are intentionally disabled.
 function disableOnlineOrderFeatures(){
-  document.querySelectorAll('.tab[data-view="orders"],.tab[data-view="reports"]').forEach(el=>el.style.display='none');
+  // Keep existing Reports and all offline billing/stock features. Only online Customer Orders are hidden.
+  document.querySelectorAll('.tab[data-view="orders"]').forEach(el=>el.style.display='none');
   $('orders')?.classList.add('hidden');
-  $('reports')?.classList.add('hidden');
+  // Restore the existing Customer Reminders action/navigation.
   document.querySelectorAll('#home button').forEach(btn=>{
     const txt=(btn.textContent||'').trim().toLowerCase();
-    if(txt.includes('reminders')) btn.style.display='none';
+    if(txt.includes('reminders')) btn.style.display='';
   });
+  const nav=$('bottomNav');
+  if(nav){
+    if(!nav.querySelector('[data-view="reminders"]')){
+      const b=document.createElement('button');
+      b.className='tab'; b.dataset.view='reminders';
+      b.innerHTML='<span class="navicon">🔔</span>Reminders';
+      nav.appendChild(b);
+    }
+    nav.style.gridTemplateColumns='repeat('+nav.querySelectorAll('.tab').length+',1fr)';
+    nav.querySelectorAll('.tab').forEach(b=>b.onclick=()=>{
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      b.classList.add('active');
+      document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));
+      $(b.dataset.view)?.classList.remove('hidden');
+      if(b.dataset.view==='reminders') renderReminders();
+    });
+    const rb=nav.querySelector('[data-view="reminders"]'); if(rb)rb.style.display='block';
+  }
 }
-async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=[];purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=[];suppliers=get('suppliers',[]);disableOnlineOrderFeatures();renderAll();return}if(liveStarted&&!force){disableOnlineOrderFeatures();renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});
+async function loadAll(force=false){if(!configured){products=get('products',[]);currentOrders=[];purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);disableOnlineOrderFeatures();renderAll();return}if(liveStarted&&!force){disableOnlineOrderFeatures();renderAll();return}if(force){location.reload();return}liveStarted=true;const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{assign(s.docs.map(d=>({id:d.id,...d.data()})));renderAll()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync error</b><br><span class="small">'+esc(e.message||'Please check Firebase rules and refresh.')+'</span>'});
   // Only data required for stock upload/purchase and billing is synchronized. No online-order listener.
   listen('products',v=>products=v);
   listen('purchases',v=>purchases=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
@@ -138,7 +157,7 @@ async function loadAll(force=false){if(!configured){products=get('products',[]);
   listen('bills',v=>bills=v.sort((a,b)=>t(b.createdAt)-t(a.createdAt)));
   listen('customers',v=>customers=v);
   listen('suppliers',v=>suppliers=v);
-  currentOrders=[];reminders=[];
+  currentOrders=[];reminders=get('reminders',[]);
   disableOnlineOrderFeatures();
 } window.loadAll=loadAll;
 function renderAll(){if($('puDate')&&!$('puDate').value)$('puDate').value=today();renderDashboard();renderMedicineCheck();renderBilling();renderPurchases();renderBatches();renderOrders();renderStock();renderBillHistory();renderReports();renderScheduleList();renderReminders();renderSuppliers();renderSelects()}
