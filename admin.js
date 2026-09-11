@@ -418,15 +418,21 @@ async function pdfBlob(b){
   fit(topLogo,35,35,185,185);
   ctx.fillStyle='#123f7c';ctx.font='700 38px Arial';ctx.fillText('Sri Krishna Medicals',230,78);
   ctx.fillStyle='#222';ctx.font='20px Arial';
-  ctx.fillText('Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu - 636 810',230,112);
-  ctx.fillText('Phone: 8300363317',230,142);
-  ctx.fillText('Drug Licence No: TN/DPI/01386/2021',230,172);
+  ctx.fillText('Kaveri Road, Pennagaram, Dharmapuri District,',230,112);
+  ctx.fillText('Tamil Nadu - 636 810',230,132);
+  ctx.fillText('Phone: 8300363317',230,152);
+  ctx.fillText('Drug Licence No: TN/DPI/01386/2021',230,177);
   ctx.fillText('FSSAI Licence No: 22422039000512',230,202);
   ctx.fillStyle='#dff0ff';ctx.fillRect(865,42,330,58);
   ctx.fillStyle='#123f7c';ctx.font='700 28px Arial';ctx.fillText('Invoice '+esc2(b.invoiceNumber||'-'),885,80);
   ctx.fillStyle='#222';ctx.font='18px Arial';
   const meta=[['Date',b.billDate||'-'],['Customer',b.customerName||'Walk-in Customer'],['Mobile',b.mobile||'-'],['Prescribed By',b.doctor||'-']];
-  meta.forEach((m,i)=>{const yy=125+i*30;ctx.font='700 18px Arial';ctx.fillText(m[0],865,yy);ctx.font='18px Arial';ctx.fillText(': '+esc2(m[1]),935,yy)});
+  // Keep the label and value in separate columns so long customer/doctor names never overlap.
+  meta.forEach((m,i)=>{
+    const yy=125+i*30;
+    ctx.font='700 18px Arial';ctx.fillText(m[0],865,yy);
+    ctx.font='18px Arial';ctx.fillText(': '+esc2(m[1]),985,yy);
+  });
   ctx.strokeStyle='#1b5f9f';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(35,230);ctx.lineTo(1205,230);ctx.stroke();
   const x=[35,105,420,600,790,855,1000,1205], top=250, headH=42, rowH=48;
   ctx.fillStyle='#dff0ff';ctx.fillRect(x[0],top,x[7]-x[0],headH);
