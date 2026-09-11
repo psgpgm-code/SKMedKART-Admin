@@ -4,6 +4,7 @@
 // A one-time Firebase migration copies existing cloud data into local storage.
 
 const K='skm_pharmacy_v2_';
+const OFFLINE_LOGIN_KEY='skm_admin_offline_session_v1';
 const DELETED_PRODUCTS_KEY='skm_deleted_products_v1';
 const getDeletedProducts=()=>{try{return new Set(JSON.parse(localStorage.getItem(DELETED_PRODUCTS_KEY)||'[]').map(String))}catch{return new Set()}};
 const setDeletedProducts=s=>localStorage.setItem(DELETED_PRODUCTS_KEY,JSON.stringify([...s]));
@@ -88,6 +89,7 @@ window.adminLogin=async()=>{
   if(!configured){
     // Offline admin login. No network/Firebase is required for normal use.
     if((em==='admin@skmedkart.local'&&pw==='1234') || (em==='psgpgm@gmail.com'&&pw==='7200673944')){
+      localStorage.setItem(OFFLINE_LOGIN_KEY,'yes');
       loginMessage('✓ Login successful. Opening admin panel...','success');
       await showPanel();
       return
@@ -120,7 +122,7 @@ window.adminLogin=async()=>{
   }
 };
 window.adminLogout=()=>{
-  const close=()=>{$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden')};
+  const close=()=>{$('panel')?.classList.add('hidden');$('bottomNav')?.classList.add('hidden');$('loginCard')?.classList.remove('hidden');localStorage.removeItem(OFFLINE_LOGIN_KEY)};
   if(configured)signOut(auth).catch(e=>console.error('Logout error:',e)).finally(close);else close();
 };
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
@@ -944,7 +946,7 @@ window.scanBarcode=()=>alert('Barcode scanner is not available in this browser b
 window.searchMedicine=()=>{};
 window.previewBill=()=>{if(!billCart.length)return alert('Add at least one item first.');const temp={invoiceNumber:'PREVIEW',customerName:$('bCustomer').value||'Walk-in Customer',mobile:$('bMobile').value,doctor:$('bDoctor').value,paymentMode:$('bPayment').value,note:$('bNote').value,items:billCart,...billTotals(),billDate:today()};const w=window.open('','_blank');if(!w)return alert('Please allow popups for Print / PDF.');w.document.write(billHtml(temp));w.document.close();w.focus();setTimeout(()=>w.print(),300)};
 window.openBillViewFromButton=id=>window.viewBill(id);
-window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
+window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();if(!configured&&localStorage.getItem(OFFLINE_LOGIN_KEY)==='yes'){showPanel().catch(e=>console.error('Auto-open after refresh failed:',e));}else if(configured)ensureFirebase().catch(e=>{console.error('Firebase startup error:',e);loginMessage('⚠️ Firebase connection could not be initialized. Tap Login to retry.','error')});});
 
 /* V5.9.3 - Purchase QR scanner: additive only.
    Scans a medicine-pack QR code and auto-fills Purchase Entry fields when
