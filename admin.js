@@ -418,10 +418,9 @@ async function pdfBlob(b){
   fit(topLogo,35,35,185,185);
   ctx.fillStyle='#123f7c';ctx.font='700 38px Arial';ctx.fillText('Sri Krishna Medicals',230,78);
   ctx.fillStyle='#222';ctx.font='20px Arial';
-  ctx.fillText('Kaveri Road, Pennagaram, Dharmapuri District,',230,112);
-  ctx.fillText('Tamil Nadu - 636 810',230,132);
-  ctx.fillText('Phone: 8300363317',230,152);
-  ctx.fillText('Drug Licence No: TN/DPI/01386/2021',230,177);
+  ctx.fillText('Kaveri Road, Pennagaram, Dharmapuri District, Tamil Nadu - 636 810',230,112);
+  ctx.fillText('Phone: 8300363317',230,142);
+  ctx.fillText('Drug Licence No: TN/DPI/01386/2021',230,172);
   ctx.fillText('FSSAI Licence No: 22422039000512',230,202);
   ctx.fillStyle='#dff0ff';ctx.fillRect(865,42,330,58);
   ctx.fillStyle='#123f7c';ctx.font='700 28px Arial';ctx.fillText('Invoice '+esc2(b.invoiceNumber||'-'),885,80);
@@ -812,6 +811,12 @@ function renderStock(){
    '<div class="small" style="margin-top:8px" id="stockShowing">Showing 0 of '+products.length+' products</div>';
  renderStockListOnly();
 }
+function reportBillDate(b){return String(b?.billDate||b?.date||b?.createdAt||'').slice(0,10)}
+function reportRowsForRange(from,to){return bills.filter(b=>{if(b.returned)return false;const d=reportBillDate(b);return d&&d>=from&&d<=to}).sort((a,b)=>reportBillDate(a).localeCompare(reportBillDate(b)))}
+function renderCustomReport(rows,title,from,to){const total=rows.reduce((n,b)=>n+Number(b.grandTotal||0),0),count=rows.length;const box=$('customReportResult');if(!box)return;box.innerHTML='<div class="totalbox"><div class="totalrow"><span>'+esc(title)+'</span><b>'+count+' bill(s)</b></div><div class="totalrow"><span>Total Sales</span><b>'+money(total)+'</b></div><div class="small">'+esc(from)+' to '+esc(to)+'</div></div><div style="overflow:auto"><table class="reportTable"><thead><tr><th>Invoice</th><th>Customer</th><th>Date</th><th>Total</th><th>Payment</th></tr></thead><tbody>'+rows.map(b=>'<tr><td>'+esc(b.invoiceNumber||'-')+'</td><td>'+esc(b.customerName||'-')+'</td><td>'+esc(reportBillDate(b))+'</td><td>'+money(b.grandTotal)+'</td><td>'+esc(b.paymentMode||'-')+'</td></tr>').join('')+'</tbody></table></div>'+(rows.length?'':'<div class="small" style="margin-top:10px">No bills found for this period.</div>')}
+window.generateDateReport=()=>{const from=$('reportFrom')?.value||'',to=$('reportTo')?.value||'';if(!from||!to)return alert('Select From and To dates.');if(from>to)return alert('From date cannot be after To date.');renderCustomReport(reportRowsForRange(from,to),'Date-wise Report',from,to)}
+window.generateQuickReport=days=>{const to=today(),d=new Date(to+'T00:00:00');d.setDate(d.getDate()-Math.max(1,Number(days)||7)+1);const from=d.toISOString().slice(0,10);if($('reportFrom'))$('reportFrom').value=from;if($('reportTo'))$('reportTo').value=to;renderCustomReport(reportRowsForRange(from,to),(days==10?'10-Day':'7-Day')+' Report',from,to)}
+window.generateMonthlyReport=()=>{const month=$('reportMonth')?.value||today().slice(0,7);const from=month+'-01',d=new Date(from+'T00:00:00');d.setMonth(d.getMonth()+1);const to=new Date(d.getTime()-86400000).toISOString().slice(0,10);if($('reportFrom'))$('reportFrom').value=from;if($('reportTo'))$('reportTo').value=to;renderCustomReport(reportRowsForRange(from,to),'Monthly Report',from,to)}
 function renderReports(){const sales=bills.filter(b=>!b.returned).reduce((s,b)=>s+Number(b.grandTotal||0),0),purchaseCost=purchases.reduce((s,p)=>s+Number(p.qty||0)*Number(p.purchasePrice||0),0),gross=sales-purchaseCost;$('reportCards').innerHTML='<div class="stat">Total Sales<br>'+money(sales)+'</div><div class="stat">Purchase Value<br>'+money(purchaseCost)+'</div><div class="stat">Gross Margin<br>'+money(gross)+'</div><div class="stat">Bills<br>'+bills.length+'</div>';$('reportRows').innerHTML=bills.slice(0,100).map(b=>'<tr><td>'+esc(b.invoiceNumber)+'</td><td>'+esc(b.customerName)+'</td><td>'+esc(b.billDate||'')+'</td><td>'+money(b.grandTotal)+'</td><td>'+esc(b.paymentMode)+'</td><td><button onclick="printBill(\''+esc(b.id||b.invoiceNumber)+'\')">Print</button> <button onclick="saveBillPdf(\''+esc(b.id||b.invoiceNumber)+'\')">PDF</button> <button onclick="shareBill(\''+esc(b.id||b.invoiceNumber)+'\')">Share</button></td></tr>').join('')}
 function scheduleValue(p){return String(p?.schedule||p?.scheduleClass||'').toUpperCase().replace('SCHEDULE ','');}
 function scheduleProductId(item){return item?.productId||item?.productID||'';}
