@@ -17,3 +17,5 @@ Verification:
 - admin.js passes Node JavaScript syntax check.
 - index.html references the new script version.
 - service worker cache/version references the same build version.
+
+V5.9.33: Purchase header persistence only. Purchase Date, Supplier and Purchase Invoice No. remain populated for consecutive purchase entries until the user changes them. Other features unchanged.

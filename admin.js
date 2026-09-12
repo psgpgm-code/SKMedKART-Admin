@@ -356,6 +356,20 @@ async function loadAll(force=false){
  listen('suppliers',v=>suppliers=v);
  schedulePendingBillSync();schedulePendingPurchaseSync();
 } window.loadAll=loadAll;
+function loadPurchaseHeaderDefaults(){
+  const d=get('purchaseHeaderDefaults',{});
+  if($('puDate')&&!$('puDate').value)$('puDate').value=d.date||today();
+  if($('puSupplier')&&!$('puSupplier').value)$('puSupplier').value=String(d.supplier||'');
+  if($('puInvoice')&&!$('puInvoice').value)$('puInvoice').value=String(d.invoice||'');
+}
+function savePurchaseHeaderDefaults(){
+  if(editingPurchaseId)return;
+  set('purchaseHeaderDefaults',{date:$('puDate')?.value||today(),supplier:$('puSupplier')?.value?.trim()||'',invoice:$('puInvoice')?.value?.trim()||''});
+}
+function bindPurchaseHeaderDefaults(){
+  ['puDate','puSupplier','puInvoice'].forEach(id=>{const el=$(id);if(!el||el.dataset.headerBound==='1')return;el.dataset.headerBound='1';el.addEventListener('change',savePurchaseHeaderDefaults);el.addEventListener('input',savePurchaseHeaderDefaults);});
+  loadPurchaseHeaderDefaults();
+}
 function renderAll(){
   if($('puDate')&&!$('puDate').value)$('puDate').value=today();
   renderDashboard();
@@ -717,8 +731,9 @@ window.cancelPurchaseEdit=()=>{
   editingPurchaseId='';
   const btn=document.querySelector('#purchaseSaveBtn'); if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
   const cancel=$('purchaseEditCancel'); if(cancel)cancel.remove();
-  ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer','puSupplier','puInvoice'].forEach(id=>{if($(id))$(id).value=''});
-  if($('puMinQty'))$('puMinQty').value='10'; if($('puCategory'))$('puCategory').value='Human Medicines'; if($('puSchedule'))$('puSchedule').value=''; if($('puDate'))$('puDate').value=today();
+  ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});
+  if($('puMinQty'))$('puMinQty').value='10'; if($('puCategory'))$('puCategory').value='Human Medicines'; if($('puSchedule'))$('puSchedule').value='';
+  loadPurchaseHeaderDefaults();
   renderPurchases();
 };
 window.editPurchase=async id=>{
@@ -783,7 +798,8 @@ window.savePurchase=async()=>{
     purchases.unshift(purchase); const sm=get('stockMovements',[]);sm.push({id:purchase.id+'_SM',type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});
     set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
     alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.\nSaved safely on this phone.');
-    ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer','puSupplier','puInvoice'].forEach(id=>{if($(id))$(id).value=''});if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';renderAll()
+    savePurchaseHeaderDefaults();
+    ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';loadPurchaseHeaderDefaults();renderAll()
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
 
