@@ -190,9 +190,8 @@ function pendingSaleTotals(){
 }
 function mergePendingBills(remote){const map=new Map((remote||[]).map(b=>[String(b.id||b.invoiceNumber),b]));for(const b of getPendingBills()){const k=String(b.id||b.invoiceNumber);if(!map.has(k))map.set(k,{...b,syncStatus:'Pending Firebase sync'})}return [...map.values()].sort((a,b)=>t(b.createdAt||b.billDate)-t(a.createdAt||a.billDate))}
 function applyPendingStockOverlay(){
- const {prod,batch}=pendingSaleTotals();
- for(const p of products){const q=prod.get(p.id)||0;if(q)p.stock=Math.max(0,Number(p.stock||0)-q)}
- for(const b of batches){const q=batch.get(b.id)||0;if(q)b.stock=Math.max(0,Number(b.stock||0)-q)}
+ // saveBill() already deducts local stock. Never subtract pending bills again.
+ return;
 }
 let pendingSyncTimer=null,pendingSyncRunning=false;
 async function syncPendingBills(){
@@ -267,18 +266,29 @@ function renderMedicineCheck(){
 window.checkMedicineAvailability=()=>{
  const input=$('mcSearch'); const result=$('mcResult'); if(!input||!result)return;
  const q=input.value.trim(); if(!q){result.innerHTML='<div class="warning">Enter a medicine name.</div>';return}
- const exact=findMedicineBySearch(q);
- const list=exact?[exact]:medicineMatches(q);
+ const nq=normMedicineName(q);
+ const exactProducts=products.filter(p=>normMedicineName(p.name)===nq);
+ const list=exactProducts.length?exactProducts:medicineMatches(q);
  if(!list.length){result.innerHTML='<div class="zero"><b>❌ Medicine not found</b><br><span class="small">No matching medicine is in the current stock list.</span></div>';return}
- result.innerHTML=list.map(p=>{
-   const usable=batches.filter(b=>b.productId===p.id&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED');
+ const groups=new Map();
+ list.forEach(p=>{const key=normMedicineName(p.name)||String(p.id);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(p)});
+ result.innerHTML=[...groups.values()].map(group=>{
+   const representative=group[0];
+   const ids=new Set(group.map(p=>String(p.id)));
+   const name=normMedicineName(representative.name);
+   const relatedBatches=batches.filter(b=>ids.has(String(b.productId??'')) || (name && normMedicineName(b.productName)===name));
+   const usable=relatedBatches.filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED');
    const qty=usable.reduce((sum,b)=>sum+Number(b.stock||0),0);
+   const productQty=group.reduce((sum,p)=>sum+Math.max(0,Number(p.stock||0)),0);
+   const effectiveQty=Math.max(productQty,usable.reduce((sum,b)=>sum+Math.max(0,Number(b.stock||0)),0));
    const near=usable.filter(b=>expiryStatus(b)==='NEAR EXPIRY').length;
-   const status=qty>0?'Available':'Out of Stock';
-   const batchText=usable.length?usable.sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>'<div class="small">Batch '+esc(b.batchNumber||'-')+' • Exp '+esc(b.expiryDate||'-')+' • Stock '+Number(b.stock||0)+'</div>').join(''):'<div class="small">No saleable batch stock available.</div>';
-   return '<div class="'+(qty>0?'good':'zero')+'"><b>'+esc(p.name||'Medicine')+'</b><span class="pill '+(qty>0?'':'bad')+'">'+status+(qty>0?' ✅':' ❌')+'</span><div style="margin-top:8px"><b>Current available stock: '+qty+'</b>'+(near?'<br><span class="small">⚠️ '+near+' batch(es) near expiry</span>':'')+'</div><div style="margin-top:8px">'+batchText+'</div></div>';
+   const status=effectiveQty>0?'Available':'Out of Stock';
+   const statusGood=effectiveQty>0;
+   const batchText=usable.length?usable.sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>'<div class="small">Batch '+esc(b.batchNumber||'-')+' • Exp '+esc(b.expiryDate||'-')+' • Stock '+Number(b.stock||0)+'</div>').join(''):'<div class="small">'+(productQty>0?'Product stock is '+productQty+' but no matching saleable batch was found.':'No saleable batch stock available.')+'</div>';
+   return '<div class="'+(statusGood?'good':'zero')+'"><b>'+esc(representative.name||'Medicine')+'</b><span class="pill '+(statusGood?'':'bad')+'">'+status+(statusGood?' ✅':' ❌')+'</span><div style="margin-top:8px"><b>Current available stock: '+effectiveQty+'</b>'+(qty===0&&productQty>0?'<br><span class="small">⚠️ Product stock and batch stock are not linked correctly.</span>':'')+(near?'<br><span class="small">⚠️ '+near+' batch(es) near expiry</span>':'')+'</div><div style="margin-top:8px">'+batchText+'</div></div>';
  }).join('');
 };
+
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
 function renderDashboard(){const low=products.filter(p=>Number(p.stock||0)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>Number(p.stock||0)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const normMedicineName=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' ');const productNameById=new Map(products.map(p=>[String(p.id),normMedicineName(p.name)]));const effectiveStockByName=new Map();for(const p of products){const name=normMedicineName(p.name);if(name)effectiveStockByName.set(name,Math.max(effectiveStockByName.get(name)||0,Number(p.stock||0)))}for(const b of batches){if(expiryStatus(b)==='EXPIRED')continue;const name=normMedicineName(b.productName)||productNameById.get(String(b.productId))||'';if(name)effectiveStockByName.set(name,Math.max(effectiveStockByName.get(name)||0,Number(b.stock||0)))}const alertNames=new Set();const alerts=[...zero.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n)||(effectiveStockByName.get(n)||0)>0)return false;alertNames.add(n);return true}).map(p=>'OUT OF STOCK: '+p.name),...low.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n))return false;const effective=effectiveStockByName.get(n)||0;if(effective<=0)return false;alertNames.add(n);return true}).map(p=>'LOW STOCK: '+p.name+' ('+p.stock+')'),...exp.map(b=>expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)];$('alerts').innerHTML=alerts.map(x=>'<div class="warning">'+esc(x)+'</div>').join('')||'<div class="good">No urgent stock or expiry alerts.</div>';$('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
@@ -291,6 +301,22 @@ function renderSelects(){
  const dl=$('supplierOptions');
  if(dl)dl.innerHTML=suppliers.map(x=>'<option value="'+esc(x.name)+'">'+esc(x.mobile||'')+'</option>').join('');
  updateBatchOptions();
+}
+function normMedicineName(value){return String(value||'').trim().toLowerCase().replace(/\s+/g,' ');}
+function batchesForProduct(p){
+ const pid=String(p?.id??'');
+ const name=normMedicineName(p?.name);
+ return batches.filter(b=>String(b.productId??'')===pid || (name && normMedicineName(b.productName)===name));
+}
+function effectiveMedicineStock(p){
+ const name=normMedicineName(p?.name);
+ const related=products.filter(x=>name && normMedicineName(x.name)===name);
+ const productQty=related.reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
+ const ids=new Set(related.map(x=>String(x.id)));
+ const batchQty=batches.filter(b=>ids.has(String(b.productId??'')) || (name && normMedicineName(b.productName)===name))
+   .filter(b=>Number(b.stock||0)>0 && expiryStatus(b)!=='EXPIRED')
+   .reduce((n,b)=>n+Math.max(0,Number(b.stock||0)),0);
+ return Math.max(productQty,batchQty);
 }
 function findMedicineBySearch(value){
  const q=String(value||'').trim().toLowerCase(); if(!q)return null;
@@ -308,7 +334,7 @@ function showMedicineSuggestions(inputId,boxId,onPick){
  const render=()=>{
    const list=medicineMatches(input.value);
    if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
-   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batches.filter(b=>b.productId===p.id&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
+   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
    box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
       e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
       input.value=p.name; box.classList.remove('show'); onPick(p);
@@ -788,15 +814,15 @@ const schedule=['H','H1'].includes(String($('pSchedule')?.value||'').toUpperCase
 window.deleteProduct=async id=>{const p=products.find(x=>x.id===id);if(!p)return alert('Product not found.');const related=batches.filter(b=>b.productId===id);if(!confirm('Delete '+(p.name||'this product')+' and its '+related.length+' batch(es)? This is only for a mistaken product upload and cannot be undone.'))return;try{if(configured){const wb=writeBatch(db);related.forEach(b=>wb.delete(doc(db,'batches',b.id)));wb.delete(doc(db,'products',id));await wb.commit();await addDoc(collection(db,'stockMovements'),{type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:serverTimestamp()});}const deleted=getDeletedProducts();deleted.add(String(id));setDeletedProducts(deleted);products=products.filter(x=>String(x.id)!==String(id));batches=batches.filter(b=>String(b.productId)!==String(id));set('products',products);set('batches',batches);if(!configured){const sm=get('stockMovements',[]);sm.push({id:'PDEL'+Date.now(),type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Product and its related batches deleted successfully.');renderAll()}catch(e){alert('Could not delete product: '+e.message)}};
 window.setStockFilter=(filter)=>{const box=$('stockSummary');if(!box)return;box.dataset.filter=['all','out','expiry'].includes(filter)?filter:'all';renderStock();};
 window.filterStockSearch=(value)=>{const box=$('stockSummary');if(!box)return;box.dataset.search=String(value||'');renderStockListOnly();};
-function getFilteredStock(){const box=$('stockSummary');if(!box)return products;const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();const expiredProducts=products.filter(p=>batches.some(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED'));const matches=p=>{if(!search)return true;const pt=[p.name,p.barcode,p.cat].join(' ').toLowerCase();const bt=batches.filter(b=>b.productId===p.id).map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ').toLowerCase();return (pt+' '+bt).includes(search)};let shown=products.filter(matches);if(filter==='out')shown=shown.filter(p=>Number(p.stock||0)<=0);if(filter==='expiry')shown=shown.filter(p=>expiredProducts.some(x=>x.id===p.id));return shown;}
+function getFilteredStock(){const box=$('stockSummary');if(!box)return products;const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();const expiredProducts=products.filter(p=>batchesForProduct(p).some(b=>expiryStatus(b)==='EXPIRED'));const matches=p=>{if(!search)return true;const pt=[p.name,p.barcode,p.cat].join(' ').toLowerCase();const bt=batchesForProduct(p).map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ').toLowerCase();return (pt+' '+bt).includes(search)};let shown=products.filter(matches);if(filter==='out')shown=shown.filter(p=>effectiveMedicineStock(p)<=0);if(filter==='expiry')shown=shown.filter(p=>expiredProducts.some(x=>x.id===p.id));return shown;}
 function renderStockListOnly(){
  const shown=getFilteredStock(),list=$('stockList');
  if(!list)return;
  list.innerHTML=shown.map(p=>{
-   const st=Number(p.stock||0)<=0?'Out of Stock':Number(p.stock||0)<=Number(p.lowStockLevel??10)?'Low Stock':'Available';
-   const exp=batches.filter(b=>b.productId===p.id&&expiryStatus(b)==='EXPIRED');
+   const effectiveStock=effectiveMedicineStock(p);const st=effectiveStock<=0?'Out of Stock':effectiveStock<=Number(p.lowStockLevel??10)?'Low Stock':'Available';
+   const exp=batchesForProduct(p).filter(b=>expiryStatus(b)==='EXPIRED');
    const expText=exp.length?' • '+exp.length+' expired batch(es)':'';
-   return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+Number(p.stock||0)+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'" onclick="window.deleteProduct(this.getAttribute(&#39;data-delete-product&#39;))">🗑️ Delete Product</button></div>';
+   return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+effectiveStock+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'" onclick="window.deleteProduct(this.getAttribute(&#39;data-delete-product&#39;))">🗑️ Delete Product</button></div>';
  }).join('')||'<div class="small">No matching stock found.</div>';
  // Direct button handler above is used for reliable standalone/PWA clicks.
  const c=$('stockShowing');if(c)c.textContent='Showing '+shown.length+' of '+products.length+' products';
@@ -808,7 +834,7 @@ function renderStock(){
  const search=String(box.dataset.search||'').trim().toLowerCase();
  const zero=products.filter(p=>Number(p.stock||0)<=0);
  const low=products.filter(p=>Number(p.stock||0)>0&&Number(p.stock||0)<=Number(p.lowStockLevel??10));
- const expiryProducts=products.filter(p=>batches.some(b=>b.productId===p.id&&['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b))));
+ const expiryProducts=products.filter(p=>batchesForProduct(p).some(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b))));
  box.innerHTML='<div class="grid">'+
    '<button class="'+(filter==='out'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'out\')">🔴 Out of stock: '+zero.length+'</button>'+ 
    '<button class="'+(filter==='expiry'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'expiry\')">📅 Expiry stock: '+expiryProducts.length+'</button>'+ 
