@@ -19,6 +19,30 @@ const configured=false; // FINAL SAFE MODE: keep all working data local; never c
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
+let effectiveStockCache=new Map();
+function rebuildEffectiveStockCache(){
+  const nameIds=new Map();
+  for(const p of products){
+    const n=normMedicineName(p.name);
+    if(n){if(!nameIds.has(n))nameIds.set(n,new Set());nameIds.get(n).add(String(p.id));}
+  }
+  const totals=new Map();
+  for(const b of batches){
+    if(Number(b.stock||0)<=0||expiryStatus(b)==='EXPIRED')continue;
+    const n=normMedicineName(b.productName);
+    if(n){totals.set(n,(totals.get(n)||0)+Math.max(0,Number(b.stock||0)));continue;}
+    const pid=String(b.productId??'');
+    for(const [name,ids] of nameIds){if(ids.has(pid)){totals.set(name,(totals.get(name)||0)+Math.max(0,Number(b.stock||0)));break;}}
+  }
+  for(const [n,ids] of nameIds){
+    if(!totals.has(n)){
+      let total=0;
+      for(const p of products)if(normMedicineName(p.name)===n)total+=Math.max(0,Number(p.stock||0));
+      totals.set(n,total);
+    }
+  }
+  effectiveStockCache=totals;
+}
 async function ensureFirebase(){
   if(!configured)return false;
   if(db&&auth)return true;
@@ -48,15 +72,53 @@ async function ensureFirebase(){
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
+function persistReminders(rows){
+  const safe=Array.isArray(rows)?rows:[];
+  set('reminders',safe);
+  try{localStorage.setItem(REMINDER_DURABLE_KEY,JSON.stringify(safe))}catch(e){console.warn('Durable reminder copy failed:',e)}
+}
+function isReminderRow(x){
+  return !!x && typeof x==='object' && String(x.customerName||'').trim() && String(x.mobile||'').trim() && String(x.medicine||'').trim() && String(x.reminderDate||x.nextDate||'').trim();
+}
+function normalizeReminderRows(rows){
+  return Array.isArray(rows)?rows.filter(isReminderRow):[];
+}
+function loadLocalReminders(){
+  const main=normalizeReminderRows(get('reminders',[]));
+  if(main.length)return main;
+  try{
+    const durable=normalizeReminderRows(JSON.parse(localStorage.getItem(REMINDER_DURABLE_KEY)||'[]'));
+    if(durable.length){set('reminders',durable);return durable;}
+  }catch(e){console.warn('Durable reminder load skipped:',e)}
+  return [];
+}
 function recoverMissingLocalReminders(){
   try{
-    const current=get('reminders',[]);
-    if(Array.isArray(current)&&current.length)return false;
+    const current=normalizeReminderRows(get('reminders',[]));
+    if(current.length){
+      try{localStorage.setItem(REMINDER_DURABLE_KEY,JSON.stringify(current))}catch{}
+      return false;
+    }
+    const durable=loadLocalReminders();
+    if(durable.length)return true;
     const keys=['skm_offline_pre_migration_backup_v1','skm_offline_backup_v1','skm_full_backup_v1','skm_backup_v1','skm_pharmacy_backup_v1'];
     for(const key of keys){
       const raw=localStorage.getItem(key); if(!raw)continue;
-      const backup=JSON.parse(raw); const rows=backup?.collections?.reminders||backup?.reminders;
-      if(Array.isArray(rows)&&rows.length){set('reminders',rows);return true;}
+      const backup=JSON.parse(raw); const rows=normalizeReminderRows(backup?.collections?.reminders||backup?.reminders);
+      if(rows.length){persistReminders(rows);return true;}
+    }
+    // Last-resort, non-destructive recovery: older builds may have stored reminders
+    // under a different key. Inspect localStorage only for arrays containing the
+    // unmistakable reminder fields; never overwrite a non-empty reminder store.
+    for(let i=0;i<localStorage.length;i++){
+      const key=localStorage.key(i)||'';
+      if(key===REMINDER_DURABLE_KEY||key===K+'reminders'||!/(reminder|backup|pharmacy|skm)/i.test(key))continue;
+      try{
+        const parsed=JSON.parse(localStorage.getItem(key)||'null');
+        const candidates=normalizeReminderRows(parsed?.collections?.reminders||parsed?.reminders||parsed);
+        if(candidates.length){persistReminders(candidates);return true;}
+      }catch{}
     }
   }catch(e){console.warn('Reminder recovery skipped:',e)}
   return false;
@@ -299,60 +361,55 @@ function stockLedgerDeltaForBatch(batchId){
  return delta;
 }
 function repairLocalStockConsistency(){
- // Stock is batch-ledger authoritative. A batch with a recorded purchase has a
- // deterministically reconstructable quantity: purchase movements + all later
- // sale/return/reservation movements. This prevents a stale product/batch value
- // from making 20 purchased - 3 sold appear as 18 (or any other drift).
+ // One-time legacy reconciliation. Build movement/bill indexes once so opening the app
+ // does not repeatedly scan every movement and every bill for every product/batch.
  let changed=false;
  const sm=get('stockMovements',[]);
  const hadBackup=localStorage.getItem('skm_stock_repair_backup_v2');
- if(!hadBackup){
-   try{localStorage.setItem('skm_stock_repair_backup_v2',JSON.stringify({products,batches,bills,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}
+ if(!hadBackup){try{localStorage.setItem('skm_stock_repair_backup_v2',JSON.stringify({products,batches,bills,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}}
+ const byBatch=new Map(), saleRefsByBatch=new Map(), returnRefsByBatch=new Map();
+ for(const m of sm){
+   const bid=String(m.batchId||''); if(!bid)continue;
+   const type=String(m.type||'').toUpperCase();
+   if(!byBatch.has(bid))byBatch.set(bid,[]); byBatch.get(bid).push(m);
+   if(type==='SALE'){if(!saleRefsByBatch.has(bid))saleRefsByBatch.set(bid,new Set());saleRefsByBatch.get(bid).add(String(m.reference||''));}
+   if(type==='RETURN'){if(!returnRefsByBatch.has(bid))returnRefsByBatch.set(bid,new Set());returnRefsByBatch.get(bid).add(String(m.reference||''));}
+ }
+ const billsByBatch=new Map();
+ for(const bill of bills){
+   const inv=String(bill.invoiceNumber||''); if(!inv)continue;
+   for(const it of (bill.items||[])){
+     const bid=String(it.batchId||''); if(!bid)continue;
+     const q=Math.max(0,Number(it.qty||it.quantity||0)); if(!q)continue;
+     if(!billsByBatch.has(bid))billsByBatch.set(bid,[]);
+     billsByBatch.get(bid).push({inv,q,returned:!!bill.returned});
+   }
+ }
+ const totalByProduct=new Map();
+ for(const b of batches){
+   const bid=String(b.id||''),rows=byBatch.get(bid)||[];
+   const purchaseQty=rows.filter(m=>String(m.type||'').toUpperCase()==='PURCHASE').reduce((n,m)=>n+Math.max(0,Number(m.qty||0)),0);
+   let expected;
+   if(purchaseQty>0){
+     let net=0;
+     for(const m of rows)if(String(m.type||'').toUpperCase()!=='PURCHASE')net+=Number(m.qty||0);
+     const saleRefs=saleRefsByBatch.get(bid)||new Set(),returnRefs=returnRefsByBatch.get(bid)||new Set();
+     for(const x of (billsByBatch.get(bid)||[])){if(!saleRefs.has(x.inv))net-=x.q;if(x.returned&&!returnRefs.has(x.inv))net+=x.q;}
+     expected=Math.max(0,purchaseQty+net);
+   }else expected=Math.max(0,Number(b.stock||0));
+   if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
+   const pid=String(b.productId||''); if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected);
  }
  for(const p of products){
-   const rows=relatedBatchesForProduct(p); if(!rows.length)continue;
-   let total=0;
-   for(const b of rows){
-     const hasPurchase=hasPurchaseMovementForBatch(b.id);
-     let expected;
-     if(hasPurchase){
-       const purchaseQty=sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='PURCHASE')
-         .reduce((n,m)=>n+Math.max(0,Number(m.qty||0)),0);
-       expected=Math.max(0,purchaseQty+stockLedgerDeltaForBatch(b.id)-purchaseQty);
-       // Equivalent to the full ledger net, but explicit purchase base makes the
-       // intended formula clear and resilient to legacy movement types.
-       expected=Math.max(0,purchaseQty+sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()!=='PURCHASE')
-         .reduce((n,m)=>n+Number(m.qty||0),0));
-       // If legacy bills have no SALE movement, stockLedgerDeltaForBatch already
-       // includes them; add only the missing legacy bill delta over the movement net.
-       let legacyMissing=0;
-       const saleRefs=new Set(sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='SALE').map(m=>String(m.reference||'')));
-       const returnRefs=new Set(sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='RETURN').map(m=>String(m.reference||'')));
-       for(const bill of bills){
-         const inv=String(bill.invoiceNumber||''); if(!inv)continue;
-         for(const it of (bill.items||[])) if(String(it.batchId||'')===String(b.id)){
-           const q=Math.max(0,Number(it.qty||it.quantity||0));
-           if(q&&!saleRefs.has(inv))legacyMissing-=q;
-           if(q&&bill.returned&&!returnRefs.has(inv))legacyMissing+=q;
-         }
-       }
-       expected=Math.max(0,expected+legacyMissing);
-     }else{
-       // Opening-stock batches have no purchase movement. Preserve their stored
-       // quantity because their opening balance is the source of truth.
-       expected=Math.max(0,Number(b.stock||0));
-     }
-     if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
-     total+=expected;
-   }
-   if(Math.abs(Number(p.stock||0)-total)>0.000001){p.stock=total;changed=true;}
+   const total=totalByProduct.get(String(p.id));
+   if(total!==undefined&&Math.abs(Number(p.stock||0)-total)>0.000001){p.stock=total;changed=true;}
  }
- if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v2','yes');}
+ if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v3','yes');}
 }
 
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);if(localStorage.getItem('skm_stock_repair_v3_done')!=='yes'){repairLocalStockConsistency();localStorage.setItem('skm_stock_repair_v3_done','yes')}renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
@@ -386,6 +443,10 @@ function bindPurchaseHeaderDefaults(){
   loadPurchaseHeaderDefaults();
 }
 function renderAll(){
+  // Reuse stock calculations during one render cycle; this avoids repeatedly scanning
+  // hundreds of products/batches on mobile and keeps the UI responsive.
+  effectiveStockCache=new Map();
+  rebuildEffectiveStockCache();
   if($('puDate')&&!$('puDate').value)$('puDate').value=today();
   renderDashboard();
   renderSelects();
@@ -419,7 +480,23 @@ window.checkMedicineAvailability=()=>{
    const representative=group[0];
    const ids=new Set(group.map(p=>String(p.id)));
    const name=normMedicineName(representative.name);
-   const relatedBatches=batches.filter(b=>ids.has(String(b.productId??'')) || (name && normMedicineName(b.productName)===name));
+   // Resolve batches by product id/name AND legacy purchase records. Older
+   // imports can leave a batch with a different productId or slightly different
+   // name formatting, even though the purchase clearly belongs to this medicine.
+   const matchingPurchases=(purchases||[]).filter(pu=>{
+     const puName=normMedicineName(pu?.productName||pu?.medicine||pu?.name);
+     const puPid=String(pu?.productId||'');
+     return (puPid&&ids.has(puPid)) || (!!name&&puName===name);
+   });
+   const purchasePids=new Set(matchingPurchases.map(pu=>String(pu?.productId||'')).filter(Boolean));
+   const purchaseBatches=new Set(matchingPurchases.map(pu=>normMedicineName(pu?.batchNumber||pu?.batch)).filter(Boolean));
+   const relatedBatches=batches.filter(b=>{
+     if(ids.has(String(b.productId??''))||purchasePids.has(String(b.productId??'')))return true;
+     const batchNames=[b?.productName,b?.medicineName,b?.medicine,b?.name].map(normMedicineName).filter(Boolean);
+     if(!!name&&batchNames.includes(name))return true;
+     const bn=normMedicineName(b?.batchNumber||b?.batch);
+     return !!bn&&purchaseBatches.has(bn);
+   });
    const usable=relatedBatches.filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED');
    const qty=usable.reduce((sum,b)=>sum+Math.max(0,Number(b.stock||0)),0);
    const productQty=group.reduce((sum,p)=>sum+Math.max(0,Number(p.stock||0)),0);
@@ -446,21 +523,29 @@ function renderSelects(){
  updateBatchOptions();
 }
 function normMedicineName(value){return String(value||'').trim().toLowerCase().replace(/\s+/g,' ');}
-function batchesForProduct(p){
+function batchMatchesProduct(b,p){
  const pid=String(p?.id??'');
  const name=normMedicineName(p?.name);
- return batches.filter(b=>String(b.productId??'')===pid || (name && normMedicineName(b.productName)===name));
+ if(String(b?.productId??'')===pid)return true;
+ const batchNames=[b?.productName,b?.medicineName,b?.medicine,b?.name].map(normMedicineName).filter(Boolean);
+ return !!name && batchNames.includes(name);
+}
+function batchesForProduct(p){
+ return batches.filter(b=>batchMatchesProduct(b,p));
 }
 function effectiveMedicineStock(p){
  const name=normMedicineName(p?.name);
- const related=products.filter(x=>name && normMedicineName(x.name)===name);
+ if(!name)return Math.max(0,Number(p?.stock||0));
+ if(effectiveStockCache.has(name))return effectiveStockCache.get(name);
+ const related=products.filter(x=>normMedicineName(x.name)===name);
  const ids=new Set(related.map(x=>String(x.id)));
- const relatedBatches=batches.filter(b=>ids.has(String(b.productId??'')) || (name && normMedicineName(b.productName)===name));
+ const relatedBatches=batches.filter(b=>ids.has(String(b.productId??'')) || normMedicineName(b.productName)===name);
+ let total;
  if(relatedBatches.length){
-   return relatedBatches.filter(b=>Number(b.stock||0)>0 && expiryStatus(b)!=='EXPIRED')
+   total=relatedBatches.filter(b=>Number(b.stock||0)>0 && expiryStatus(b)!=='EXPIRED')
      .reduce((n,b)=>n+Math.max(0,Number(b.stock||0)),0);
- }
- return related.reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
+ }else total=related.reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
+ total=Math.max(0,total);effectiveStockCache.set(name,total);return total;
 }
 function findMedicineBySearch(value){
  const q=String(value||'').trim().toLowerCase(); if(!q)return null;
@@ -714,7 +799,57 @@ async function restoreData(data){
  if(configured){
   for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];for(let i=0;i<rows.length;i+=400){const wb=writeBatch(db);rows.slice(i,i+400).forEach((row,n)=>{const copy={...row};const id=String(copy.id||uid());delete copy.id;wb.set(doc(db,name,id),copy,{merge:true});});await wb.commit();}}
  }else{
-  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];if(name==='orders')set('orders',rows);else set(name,rows);}
+  // Restore is a snapshot import. On a different phone the same purchase may have
+  // a different local ID, so ID-only duplicate detection is not safe. Identify an
+  // already-present purchase by its stable business fields and remove only that
+  // purchase quantity from the restored batch. This makes restore idempotent across
+  // phones without deleting the purchase record itself.
+  const beforePurchases=get('purchases',[]);
+  const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
+  const purchaseFingerprint=pu=>{
+    const invoice=norm(pu?.purchaseInvoiceNo||pu?.invoiceNo||pu?.invoice||'');
+    const product=norm(pu?.productId||'');
+    const batch=norm(pu?.batchNumber||pu?.batch||'');
+    const date=norm(pu?.purchaseDate||pu?.date||'');
+    const supplier=norm(pu?.supplier||pu?.supplierName||'');
+    const medicine=norm(pu?.productName||pu?.medicine||pu?.name||'');
+    const qty=Math.max(0,Number(pu?.qty||pu?.quantity||0));
+    return [invoice,product,batch,date,supplier,medicine,qty].join('|');
+  };
+  const beforePurchaseIds=new Set((Array.isArray(beforePurchases)?beforePurchases:[]).map(x=>String(x?.id||'')).filter(Boolean));
+  const beforePurchaseFingerprints=new Set((Array.isArray(beforePurchases)?beforePurchases:[]).map(purchaseFingerprint).filter(x=>x.replace(/\|/g,'').length));
+  const rowsByName={};
+  for(const name of backupCollections)rowsByName[name]=Array.isArray(data.collections[name])?data.collections[name]:[];
+  const restoredPurchases=rowsByName.purchases||[];
+  const duplicatePurchaseQtyByBatch=new Map();
+  for(const pu of restoredPurchases){
+    const pid=String(pu?.id||'');
+    const fp=purchaseFingerprint(pu);
+    const duplicate=!!(pid&&beforePurchaseIds.has(pid)) || (!!fp&&beforePurchaseFingerprints.has(fp));
+    if(!duplicate)continue;
+    const productId=String(pu?.productId||'').trim();
+    const batchNumber=String(pu?.batchNumber||pu?.batch||'').trim();
+    if(!productId||!batchNumber)continue;
+    const bid=productId+'__'+batchNumber;
+    duplicatePurchaseQtyByBatch.set(bid,(duplicatePurchaseQtyByBatch.get(bid)||0)+Math.max(0,Number(pu?.qty||pu?.quantity||0)));
+  }
+  const correctedBatches=(rowsByName.batches||[]).map(row=>{
+    const bid=String(row?.id||'') || (String(row?.productId||'')+'__'+String(row?.batchNumber||row?.batch||''));
+    const dup=duplicatePurchaseQtyByBatch.get(bid)||0;
+    return dup?{...row,stock:Math.max(0,Number(row?.stock||0)-dup)}:row;
+  });
+  for(const name of backupCollections){
+    if(name==='batches')set(name,correctedBatches);
+    else if(name==='products')continue;
+    else if(name==='orders')set('orders',rowsByName[name]);
+    else set(name,rowsByName[name]);
+  }
+  // Product stock must equal the corrected batch total, so the duplicate purchase
+  // cannot reappear through the product-level stock field.
+  const totals=new Map();
+  for(const b of correctedBatches){const pid=String(b?.productId||'');if(pid)totals.set(pid,(totals.get(pid)||0)+Math.max(0,Number(b?.stock||0)));}
+  const restoredProducts=(rowsByName.products||[]).map(p=>totals.has(String(p?.id||''))?{...p,stock:totals.get(String(p?.id||''))}:{...p});
+  set('products',restoredProducts);
  }
 }
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});
@@ -1154,9 +1289,9 @@ function renderScheduleList(){
 window.viewScheduleMedicine=id=>{const p=products.find(x=>x.id===id);if(!p)return alert('Medicine not found.');const st=scheduleStats(p);const purchaseRows=st.pur.slice(0,100).map(x=>'<div class="itemrow"><b>Purchase</b> • '+esc(x.purchaseDate||x.createdAt||'-')+'<br><span class="small">Qty '+Number(x.qty||0)+' • Batch '+esc(x.batchNumber||'-')+' • Supplier '+esc(x.supplier||'-')+' • Value '+money(Number(x.qty||0)*Number(x.purchasePriceWithGst??x.purchasePrice??0))+'</span></div>').join('')||'<div class="small">No purchase records.</div>';const salesRows=st.sales.slice(0,100).map(x=>'<div class="itemrow"><b>Sale '+esc(x.bill.invoiceNumber||'-')+'</b> • '+esc(x.bill.billDate||'-')+'<br><span class="small">Customer '+esc(x.bill.customerName||'-')+' • Qty '+Number(x.item.qty||x.item.quantity||0)+' • Value '+money(Number(x.item.qty||x.item.quantity||0)*Number(x.item.price||0))+'</span></div>').join('')||'<div class="small">No sales records.</div>';$('billModalContent').innerHTML='<button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><h3>💊 '+esc(p.name)+'</h3><p><span class="pill">Schedule '+esc(scheduleValue(p)||'-')+'</span></p><div class="totalbox"><div class="totalrow"><span>Total Purchase Qty</span><b>'+st.purchaseQty+'</b></div><div class="totalrow"><span>Total Purchase Value</span><b>'+money(st.purchaseValue)+'</b></div><div class="totalrow"><span>Total Sales Qty</span><b>'+st.salesQty+'</b></div><div class="totalrow"><span>Total Sales Value</span><b>'+money(st.salesValue)+'</b></div><div class="totalrow grand"><span>Current Stock</span><span>'+Number(p.stock||0)+'</span></div></div><h4>Purchase History</h4>'+purchaseRows+'<h4>Sales History</h4>'+salesRows;$('billModal').classList.remove('hidden')};
 function reminderDateOf(r){return r.nextDate||r.reminderDate||'';}
 function reminderStatus(r){const ds=reminderDateOf(r);if(!ds)return 'No date';const due=new Date(ds+'T00:00:00');const now=new Date();now.setHours(0,0,0,0);const diff=Math.round((due-now)/86400000);if(diff<0)return 'Overdue '+Math.abs(diff)+' day(s)';if(diff===0)return 'Due today';if(diff===1)return 'Due tomorrow';return 'Due in '+diff+' days';}
-window.saveReminder=async()=>{const customerName=$('rCustomer').value.trim(),mobile=$('rMobile').value.trim(),medicine=$('rMedicine').value.trim(),reminderDate=$('rDate').value,repeatDays=Math.max(1,Number($('rRepeatDays')?.value)||30),mode=$('rMode')?.value||'Monthly Medicine',note=$('rNote')?.value.trim()||'';if(!customerName||!mobile||!medicine||!reminderDate)return alert('Complete customer, mobile, medicine and reminder date.');const r={customerName,mobile,medicine,reminderDate,nextDate:reminderDate,repeatDays,mode,note,status:'Pending'};try{if(configured)await addDoc(collection(db,'reminders'),{...r,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});else{r.id='R'+Date.now();r.createdAt=new Date().toISOString();reminders.push(r);set('reminders',reminders)}['rCustomer','rMobile','rMedicine','rDate','rNote'].forEach(id=>{$(id).value=''});if($('rRepeatDays'))$('rRepeatDays').value=30;alert('Customer reminder saved.');renderAll()}catch(e){alert(e.message)}};
-window.completeReminder=async id=>{const r=reminders.find(x=>x.id===id);if(!r)return;const repeat=Math.max(1,Number(r.repeatDays)||30);const base=reminderDateOf(r)||today();const d=new Date(base+'T00:00:00');d.setDate(d.getDate()+repeat);const nextDate=d.toISOString().slice(0,10);try{if(configured)await updateDoc(doc(db,'reminders',id),{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:serverTimestamp(),updatedAt:serverTimestamp()});else{Object.assign(r,{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:new Date().toISOString()});set('reminders',reminders)}renderAll();alert('Done. Next reminder: '+nextDate)}catch(e){alert(e.message)}};
-window.deleteReminder=async id=>{if(!confirm('Delete this customer reminder?'))return;try{if(configured)await deleteDoc(doc(db,'reminders',id));else{reminders=reminders.filter(x=>x.id!==id);set('reminders',reminders)}renderAll()}catch(e){alert(e.message)}};
+window.saveReminder=async()=>{const customerName=$('rCustomer').value.trim(),mobile=$('rMobile').value.trim(),medicine=$('rMedicine').value.trim(),reminderDate=$('rDate').value,repeatDays=Math.max(1,Number($('rRepeatDays')?.value)||30),mode=$('rMode')?.value||'Monthly Medicine',note=$('rNote')?.value.trim()||'';if(!customerName||!mobile||!medicine||!reminderDate)return alert('Complete customer, mobile, medicine and reminder date.');const r={customerName,mobile,medicine,reminderDate,nextDate:reminderDate,repeatDays,mode,note,status:'Pending'};try{if(configured)await addDoc(collection(db,'reminders'),{...r,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});else{r.id='R'+Date.now();r.createdAt=new Date().toISOString();reminders.push(r);persistReminders(reminders)}['rCustomer','rMobile','rMedicine','rDate','rNote'].forEach(id=>{$(id).value=''});if($('rRepeatDays'))$('rRepeatDays').value=30;alert('Customer reminder saved.');renderAll()}catch(e){alert(e.message)}};
+window.completeReminder=async id=>{const r=reminders.find(x=>x.id===id);if(!r)return;const repeat=Math.max(1,Number(r.repeatDays)||30);const base=reminderDateOf(r)||today();const d=new Date(base+'T00:00:00');d.setDate(d.getDate()+repeat);const nextDate=d.toISOString().slice(0,10);try{if(configured)await updateDoc(doc(db,'reminders',id),{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:serverTimestamp(),updatedAt:serverTimestamp()});else{Object.assign(r,{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:new Date().toISOString()});persistReminders(reminders)}renderAll();alert('Done. Next reminder: '+nextDate)}catch(e){alert(e.message)}};
+window.deleteReminder=async id=>{if(!confirm('Delete this customer reminder?'))return;try{if(configured)await deleteDoc(doc(db,'reminders',id));else{reminders=reminders.filter(x=>x.id!==id);persistReminders(reminders)}renderAll()}catch(e){alert(e.message)}};
 function renderReminders(){const list=$('reminderList');if(!list)return;const now=new Date();now.setHours(0,0,0,0);const rs=reminders.slice().sort((x,y)=>String(reminderDateOf(x)).localeCompare(String(reminderDateOf(y))));const due=rs.filter(r=>{const ds=reminderDateOf(r);return ds&&new Date(ds+'T00:00:00')<=new Date(now.getTime()+7*86400000)});const count=$('reminderDueCount');if(count)count.textContent=due.length?('Due: '+due.length):'';list.innerHTML=rs.map(r=>{const ds=reminderDateOf(r),phone=String(r.mobile||'').replace(/\D/g,''),wa=phone.length===10?'91'+phone:phone,msg=encodeURIComponent('Hello '+(r.customerName||'')+', this is Sri Krishna Medicals, Pennagaram. Reminder for '+(r.medicine||'medicine')+'.');const diff=ds?Math.round((new Date(ds+'T00:00:00')-now)/86400000):99,cls=diff<0?'overdueReminder':diff<=7?'dueReminder':'';return '<div class="itemrow '+cls+'"><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(ds)+' • '+esc(reminderStatus(r))+' • Every '+Math.max(1,Number(r.repeatDays)||30)+' days • '+esc(r.mode||'Monthly Medicine')+'<br>'+esc(r.mobile||'')+(r.note?'<br>📝 '+esc(r.note):'')+'</span><div class="reminderActions"><button class="ok" onclick="completeReminder(\''+esc(r.id)+'\')">✓ Done / Next</button>'+(wa?'<a class="link" target="_blank" href="https://wa.me/'+esc(wa)+'?text='+msg+'">WhatsApp</a>':'')+'<button class="danger" onclick="deleteReminder(\''+esc(r.id)+'\')">Delete</button></div></div>'}).join('')||'<div class="small">No customer reminders yet.</div>';}
 
 // UI bridge for the matching V5.9 HTML. These handlers keep every visible button connected.
