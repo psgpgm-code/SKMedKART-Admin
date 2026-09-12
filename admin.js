@@ -249,46 +249,90 @@ function hasPurchaseMovementForBatch(batchId){
  const id=String(batchId||'');
  return get('stockMovements',[]).some(m=>String(m.batchId||'')===id && String(m.type||'').toUpperCase()==='PURCHASE');
 }
+function stockLedgerDeltaForBatch(batchId){
+ const id=String(batchId||'');
+ const movements=get('stockMovements',[]);
+ let delta=0;
+ const saleRefs=new Set(),returnRefs=new Set();
+ for(const m of movements){
+   if(String(m.batchId||'')!==id)continue;
+   const type=String(m.type||'').toUpperCase();
+   if(type==='PURCHASE'||type==='SALE'||type==='RETURN'||type==='ORDER_RESERVE'||type==='ORDER_CANCEL_RESTOCK'){
+     // A reserved online order already deducted stock. Its later bill carries
+     // stockAlreadyReserved=true, so its SALE movement must not deduct again.
+     if(type==='SALE'&&m.reference){
+       const linkedBill=bills.find(b=>String(b.invoiceNumber||'')===String(m.reference));
+       if(linkedBill?.stockAlreadyReserved) continue;
+       saleRefs.add(String(m.reference));
+     }
+     delta+=Number(m.qty||0);
+     if(type==='RETURN'&&m.reference)returnRefs.add(String(m.reference));
+   }
+ }
+ // Repair legacy records where a billed sale exists but its stock movement was not
+ // recorded. Never add the same invoice twice when a SALE movement already exists.
+ for(const bill of bills){
+   const inv=String(bill.invoiceNumber||'');
+   if(!inv)continue;
+   for(const it of (bill.items||[])){
+     if(String(it.batchId||'')!==id)continue;
+     const q=Number(it.qty||it.quantity||0); if(q<=0)continue;
+     if(!saleRefs.has(inv)) delta-=q;
+     if(bill.returned && !returnRefs.has(inv)) delta+=q;
+   }
+ }
+ return delta;
+}
 function repairLocalStockConsistency(){
- // One-time safety reconciliation after the online/offline transition.
- // Product stock was the value used by the working billing screen; when a
- // product has exactly one batch, that batch must equal the product stock.
- // For multi-batch products, use the stock ledger where available and never
- // blindly choose the larger of product stock and batch stock.
+ // Stock is batch-ledger authoritative. A batch with a recorded purchase has a
+ // deterministically reconstructable quantity: purchase movements + all later
+ // sale/return/reservation movements. This prevents a stale product/batch value
+ // from making 20 purchased - 3 sold appear as 18 (or any other drift).
  let changed=false;
  const sm=get('stockMovements',[]);
- for(const p of products){
-  const rows=relatedBatchesForProduct(p); if(!rows.length)continue;
-  const productStock=Math.max(0,Number(p.stock||0));
-  if(rows.length===1){
-   const b=rows[0],bs=Math.max(0,Number(b.stock||0));
-   if(bs!==productStock){b.stock=productStock;changed=true;}
-   continue;
-  }
-  const relevant=sm.filter(m=>rows.some(b=>String(b.id)===String(m.batchId||'')));
-  if(!relevant.length)continue;
-  const deltas=new Map(rows.map(b=>[String(b.id),movementDeltaForBatch(b.id)]));
-  const net=[...deltas.values()].reduce((a,v)=>a+v,0);
-  const openingPool=productStock-net;
-  if(openingPool<0)continue;
-  const openingRows=rows.filter(b=>!hasPurchaseMovementForBatch(b.id));
-  const allocTarget=openingRows.length?openingRows:rows;
-  const currentTotal=allocTarget.reduce((n,b)=>n+Math.max(0,Number(b.stock||0)),0);
-  let remaining=openingPool;
-  for(let i=0;i<allocTarget.length;i++){
-   const b=allocTarget[i],base=Math.max(0,Number(b.stock||0));
-   const share=i===allocTarget.length-1?remaining:(currentTotal>0?Math.floor(openingPool*base/currentTotal):0);
-   const next=Math.max(0,(deltas.get(String(b.id))||0)+share);
-   if(Math.abs(Number(b.stock||0)-next)>0.000001){b.stock=next;changed=true;}
-   remaining=Math.max(0,remaining-share);
-  }
-  // If there are no opening rows, any remaining amount belongs to the last
-  // batch after the ledger deltas have been applied.
-  if(remaining>0){const b=allocTarget[allocTarget.length-1];b.stock=Math.max(0,Number(b.stock||0)+remaining);changed=true;}
-  const total=rows.reduce((n,b)=>n+Math.max(0,Number(b.stock||0)),0);
-  if(Math.abs(total-productStock)>0.000001)continue;
+ const hadBackup=localStorage.getItem('skm_stock_repair_backup_v2');
+ if(!hadBackup){
+   try{localStorage.setItem('skm_stock_repair_backup_v2',JSON.stringify({products,batches,bills,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}
  }
- if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v1','yes');}
+ for(const p of products){
+   const rows=relatedBatchesForProduct(p); if(!rows.length)continue;
+   let total=0;
+   for(const b of rows){
+     const hasPurchase=hasPurchaseMovementForBatch(b.id);
+     let expected;
+     if(hasPurchase){
+       const purchaseQty=sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='PURCHASE')
+         .reduce((n,m)=>n+Math.max(0,Number(m.qty||0)),0);
+       expected=Math.max(0,purchaseQty+stockLedgerDeltaForBatch(b.id)-purchaseQty);
+       // Equivalent to the full ledger net, but explicit purchase base makes the
+       // intended formula clear and resilient to legacy movement types.
+       expected=Math.max(0,purchaseQty+sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()!=='PURCHASE')
+         .reduce((n,m)=>n+Number(m.qty||0),0));
+       // If legacy bills have no SALE movement, stockLedgerDeltaForBatch already
+       // includes them; add only the missing legacy bill delta over the movement net.
+       let legacyMissing=0;
+       const saleRefs=new Set(sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='SALE').map(m=>String(m.reference||'')));
+       const returnRefs=new Set(sm.filter(m=>String(m.batchId||'')===String(b.id)&&String(m.type||'').toUpperCase()==='RETURN').map(m=>String(m.reference||'')));
+       for(const bill of bills){
+         const inv=String(bill.invoiceNumber||''); if(!inv)continue;
+         for(const it of (bill.items||[])) if(String(it.batchId||'')===String(b.id)){
+           const q=Math.max(0,Number(it.qty||it.quantity||0));
+           if(q&&!saleRefs.has(inv))legacyMissing-=q;
+           if(q&&bill.returned&&!returnRefs.has(inv))legacyMissing+=q;
+         }
+       }
+       expected=Math.max(0,expected+legacyMissing);
+     }else{
+       // Opening-stock batches have no purchase movement. Preserve their stored
+       // quantity because their opening balance is the source of truth.
+       expected=Math.max(0,Number(b.stock||0));
+     }
+     if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
+     total+=expected;
+   }
+   if(Math.abs(Number(p.stock||0)-total)>0.000001){p.stock=total;changed=true;}
+ }
+ if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v2','yes');}
 }
 
 async function loadAll(force=false){
@@ -344,7 +388,7 @@ window.checkMedicineAvailability=()=>{
 };
 
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
-function renderDashboard(){const low=products.filter(p=>Number(p.stock||0)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>Number(p.stock||0)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const normMedicineName=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' ');const productNameById=new Map(products.map(p=>[String(p.id),normMedicineName(p.name)]));const effectiveStockByName=new Map();for(const name of new Set(products.map(p=>normMedicineName(p.name)).filter(Boolean))){const rep=products.find(p=>normMedicineName(p.name)===name);effectiveStockByName.set(name,Math.max(0,effectiveMedicineStock(rep))) }const alertNames=new Set();const alerts=[...zero.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n)||(effectiveStockByName.get(n)||0)>0)return false;alertNames.add(n);return true}).map(p=>'OUT OF STOCK: '+p.name),...low.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n))return false;const effective=effectiveStockByName.get(n)||0;if(effective<=0)return false;alertNames.add(n);return true}).map(p=>'LOW STOCK: '+p.name+' ('+p.stock+')'),...exp.map(b=>expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)];$('alerts').innerHTML=alerts.map(x=>'<div class="warning">'+esc(x)+'</div>').join('')||'<div class="good">No urgent stock or expiry alerts.</div>';$('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
+function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const normMedicineName=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' ');const productNameById=new Map(products.map(p=>[String(p.id),normMedicineName(p.name)]));const effectiveStockByName=new Map();for(const name of new Set(products.map(p=>normMedicineName(p.name)).filter(Boolean))){const rep=products.find(p=>normMedicineName(p.name)===name);effectiveStockByName.set(name,Math.max(0,effectiveMedicineStock(rep))) }const alertNames=new Set();const alerts=[...zero.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n)||(effectiveStockByName.get(n)||0)>0)return false;alertNames.add(n);return true}).map(p=>'OUT OF STOCK: '+p.name),...low.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n))return false;const effective=effectiveStockByName.get(n)||0;if(effective<=0)return false;alertNames.add(n);return true}).map(p=>'LOW STOCK: '+p.name+' ('+p.stock+')'),...exp.map(b=>expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)];$('alerts').innerHTML=alerts.map(x=>'<div class="warning">'+esc(x)+'</div>').join('')||'<div class="good">No urgent stock or expiry alerts.</div>';$('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
  const selected=$('bMedicine').value,selectedPu=$('puProduct').value;
  const billSearch=$('bMedicineSearch'),purchaseSearch=$('puProductSearch');
