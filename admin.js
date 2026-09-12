@@ -255,75 +255,89 @@ function saleMovementIsAlreadyCoveredByReservation(m){
  const linked=bills.find(b=>String(b?.invoiceNumber||'')===ref);
  return !!linked?.stockAlreadyReserved;
 }
+function stockBatchKey(productId,batchNumber,name){
+ const pid=String(productId||'');
+ const bn=String(batchNumber||'').trim().toLowerCase();
+ const nm=normMedicineName(name);
+ return pid+'|'+bn+'|'+nm;
+}
+function uniqueRecords(rows,keyFn){
+ const seen=new Set(),out=[];
+ for(const row of (rows||[])){
+   const k=String(keyFn(row)||'');
+   if(k && seen.has(k))continue;
+   if(k)seen.add(k);
+   out.push(row);
+ }
+ return out;
+}
+function purchaseRowsForBatch(batch){
+ const pid=String(batch?.productId||''),bn=String(batch?.batchNumber||'').trim().toLowerCase(),name=normMedicineName(batch?.productName);
+ const all=uniqueRecords(get('purchases',[]),x=>x.id||stockBatchKey(x.productId,x.batchNumber,x.productName));
+ const exact=all.filter(x=>String(x?.productId||'')===pid && String(x?.batchNumber||x?.batch||'').trim().toLowerCase()===bn);
+ if(exact.length)return exact;
+ return all.filter(x=>String(x?.batchNumber||x?.batch||'').trim().toLowerCase()===bn && name && normMedicineName(x?.productName||x?.name||x?.medicine)===name);
+}
+function billMatchesBatch(item,batch){
+ const iid=String(item?.batchId||''),bid=String(batch?.id||'');
+ if(iid && bid && iid===bid)return true;
+ const ib=String(item?.batchNumber||item?.batch||'').trim().toLowerCase(),bb=String(batch?.batchNumber||'').trim().toLowerCase();
+ if(!ib || ib!==bb)return false;
+ const ip=String(item?.productId||''),bp=String(batch?.productId||'');
+ if(ip && bp && ip===bp)return true;
+ const iname=normMedicineName(item?.name||item?.productName||item?.medicine),bname=normMedicineName(batch?.productName);
+ return !!(iname && bname && iname===bname);
+}
+function orderReserveDeltaForBatch(batch){
+ const bid=String(batch?.id||'');
+ if(!bid)return 0;
+ return uniqueRecords(get('stockMovements',[]).filter(m=>String(m?.batchId||'')===bid && ['ORDER_RESERVE','ORDER_CANCEL_RESTOCK'].includes(String(m?.type||'').toUpperCase())),m=>m.id||[m.type,m.reference,m.orderId,m.batchId,m.qty,m.createdAt].join('|')).reduce((n,m)=>n+Number(m.qty||0),0);
+}
 function ledgerExpectedBatchStock(batch){
  const bid=String(batch?.id||'');
  if(!bid)return Math.max(0,Number(batch?.stock||0));
- const movements=get('stockMovements',[]).filter(m=>String(m?.batchId||'')===bid);
- const purchaseQty=movements
-   .filter(m=>String(m.type||'').toUpperCase()==='PURCHASE')
-   .reduce((n,m)=>n+Math.max(0,Number(m.qty||0)),0);
- // A purchase-backed batch has a deterministic opening balance: all purchase
- // quantities, plus subsequent inventory movements. A SALE belonging to an
- // already-reserved online order is intentionally ignored because ORDER_RESERVE
- // has already deducted that quantity.
- if(purchaseQty>0){
-   let stock=purchaseQty;
-   for(const m of movements){
-     const type=String(m.type||'').toUpperCase();
-     if(type==='PURCHASE')continue;
-     if(type==='SALE' && saleMovementIsAlreadyCoveredByReservation(m))continue;
-     if(['SALE','RETURN','ORDER_RESERVE','ORDER_CANCEL_RESTOCK'].includes(type)){
-       stock+=Number(m.qty||0);
-     }
-   }
-   // Legacy bills may exist without a SALE movement. Add only those missing
-   // invoice quantities; never count an invoice twice.
-   const saleRefs=new Set(movements.filter(m=>String(m.type||'').toUpperCase()==='SALE').map(m=>String(m.reference||'')));
-   const returnRefs=new Set(movements.filter(m=>String(m.type||'').toUpperCase()==='RETURN').map(m=>String(m.reference||'')));
-   for(const bill of bills){
-     const inv=String(bill?.invoiceNumber||'');
-     if(!inv)continue;
-     for(const it of (bill?.items||[])){
-       if(String(it?.batchId||'')!==bid)continue;
-       const q=Math.max(0,Number(it?.qty??it?.quantity??0));
-       if(!q)continue;
-       // Reserved-order bills were already deducted by ORDER_RESERVE.
-       if(!saleRefs.has(inv) && !bill.stockAlreadyReserved)stock-=q;
-       if(bill.returned && !returnRefs.has(inv))stock+=q;
-     }
-   }
-   return Math.max(0,stock);
+ const purchaseRows=purchaseRowsForBatch(batch);
+ if(!purchaseRows.length){
+   // Opening-stock batches do not have purchase records. Preserve their stored
+   // quantity, but still apply only explicit order reserve/cancel movements.
+   return Math.max(0,Number(batch?.stock||0)+orderReserveDeltaForBatch(batch));
  }
- // Opening-stock batches have no purchase ledger. Their stored quantity is the
- // only reliable opening balance, so do not reconstruct it from incomplete legacy
- // movements.
- return Math.max(0,Number(batch?.stock||0));
+ const purchased=purchaseRows.reduce((n,x)=>n+Math.max(0,Number(x?.qty||0)),0);
+ const billRows=uniqueRecords(get('bills',[]),b=>b?.id||b?.invoiceNumber).filter(b=>!b?.returned);
+ let sold=0;
+ for(const bill of billRows){
+   if(bill.stockAlreadyReserved)continue;
+   for(const item of (bill.items||[])){
+     if(billMatchesBatch(item,batch))sold+=Math.max(0,Number(item?.qty??item?.quantity??0));
+   }
+ }
+ const returned=uniqueRecords(get('bills',[]),b=>b?.id||b?.invoiceNumber).filter(b=>b?.returned).reduce((sum,b)=>{
+   return sum+(b.items||[]).filter(it=>billMatchesBatch(it,batch)).reduce((n,it)=>n+Math.max(0,Number(it?.qty??it?.quantity??0)),0);
+ },0);
+ const reserveDelta=orderReserveDeltaForBatch(batch);
+ return Math.max(0,purchased-sold+returned+reserveDelta);
 }
 function repairLocalStockConsistency(){
- // ONE source of truth for local stock: purchase-backed batch ledger.
- // Product stock is always the sum of its batches. Medicine Check and Stock
- // screens read those same batch quantities, so they cannot disagree.
+ // Single authoritative calculation for offline inventory:
+ // Purchase records + returned bills - sold bills + order reserve/cancel movements.
+ // Batch stock is authoritative; product stock is only the sum of its batches.
  let changed=false;
  const sm=get('stockMovements',[]);
- const hadBackup=localStorage.getItem('skm_stock_repair_backup_v3');
+ const hadBackup=localStorage.getItem('skm_stock_repair_backup_v4');
  if(!hadBackup){
-   try{localStorage.setItem('skm_stock_repair_backup_v3',JSON.stringify({products,batches,bills,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}
+   try{localStorage.setItem('skm_stock_repair_backup_v4',JSON.stringify({products,batches,purchases:get('purchases',[]),bills:get('bills',[]),orders:get('orders',[]),stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}
+ }
+ for(const b of batches){
+   const expected=ledgerExpectedBatchStock(b);
+   if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
  }
  for(const p of products){
    const rows=relatedBatchesForProduct(p);
    if(!rows.length)continue;
-   let total=0;
-   for(const b of rows){
-     const expected=ledgerExpectedBatchStock(b);
-     if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
-     total+=expected;
-   }
+   const total=rows.reduce((n,b)=>n+Math.max(0,Number(b.stock||0)),0);
    if(Math.abs(Number(p.stock||0)-total)>0.000001){p.stock=total;changed=true;}
  }
- if(changed){
-   set('batches',batches);set('products',products);
-   localStorage.setItem('skm_stock_reconciled_v3','yes');
- }
+ if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v4','yes');}
 }
 
 async function loadAll(force=false){
@@ -500,7 +514,7 @@ window.saveBill=async()=>{
  const stockAlreadyReserved=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
  bill.stockAlreadyReserved=stockAlreadyReserved;
  try{
-  for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||Number(b.stock||0)<Number(it.qty||0)||Number(p.stock||0)<Number(it.qty||0))throw Error('Insufficient stock')}
+  for(const it of items){const b=batches.find(x=>x.id===it.batchId);if(!b||Number(b.stock||0)<Number(it.qty||0))throw Error('Insufficient stock in batch '+(it.batchNumber||''))}
   if(!stockAlreadyReserved){for(const it of items){const b=batches.find(x=>x.id===it.batchId);if(!b)throw Error('Batch not found');b.stock=Math.max(0,Number(b.stock||0)-Number(it.qty||0));}const touched=[...new Set(items.map(it=>String(it.productId)))];for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}}
   bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
   const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
