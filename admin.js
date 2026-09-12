@@ -778,7 +778,47 @@ async function restoreData(data){
  if(configured){
   for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];for(let i=0;i<rows.length;i+=400){const wb=writeBatch(db);rows.slice(i,i+400).forEach((row,n)=>{const copy={...row};const id=String(copy.id||uid());delete copy.id;wb.set(doc(db,name,id),copy,{merge:true});});await wb.commit();}}
  }else{
-  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];if(name==='orders')set('orders',rows);else set(name,rows);}
+  // Same-device restore must never ADD purchase stock on top of stock already present.
+  // Keep the pre-restore purchase IDs so a backup containing the same purchases can
+  // be restored without counting those purchase quantities a second time.
+  const beforePurchases=get('purchases',[]);
+  const beforePurchaseIds=new Set((Array.isArray(beforePurchases)?beforePurchases:[]).map(x=>String(x?.id||'')).filter(Boolean));
+  const rowsByName={};
+  for(const name of backupCollections)rowsByName[name]=Array.isArray(data.collections[name])?data.collections[name]:[];
+  const restoredPurchases=rowsByName.purchases||[];
+  const duplicatePurchaseQtyByBatch=new Map();
+  for(const pu of restoredPurchases){
+    const pid=String(pu?.id||'');
+    if(!pid||!beforePurchaseIds.has(pid))continue;
+    const batchNumber=String(pu?.batchNumber||pu?.batch||'').trim();
+    const productId=String(pu?.productId||'').trim();
+    if(!productId||!batchNumber)continue;
+    const bid=productId+'__'+batchNumber;
+    duplicatePurchaseQtyByBatch.set(bid,(duplicatePurchaseQtyByBatch.get(bid)||0)+Math.max(0,Number(pu?.qty||0)));
+  }
+  for(const name of backupCollections){
+    let rows=rowsByName[name];
+    if(name==='batches'&&duplicatePurchaseQtyByBatch.size){
+      rows=rows.map(row=>{
+        const bid=String(row?.id||'') || (String(row?.productId||'')+'__'+String(row?.batchNumber||row?.batch||''));
+        const dup=duplicatePurchaseQtyByBatch.get(bid)||0;
+        if(!dup)return row;
+        return {...row,stock:Math.max(0,Number(row?.stock||0)-dup)};
+      });
+    }
+    if(name==='orders')set('orders',rows);else set(name,rows);
+  }
+  // Keep product totals consistent with the corrected restored batch quantities.
+  const restoredBatches=rowsByName.batches||[];
+  const correctedBatches=(duplicatePurchaseQtyByBatch.size?restoredBatches.map(row=>{
+    const bid=String(row?.id||'') || (String(row?.productId||'')+'__'+String(row?.batchNumber||row?.batch||''));
+    const dup=duplicatePurchaseQtyByBatch.get(bid)||0;
+    return dup?{...row,stock:Math.max(0,Number(row?.stock||0)-dup)}:row;
+  }):restoredBatches);
+  const totals=new Map();
+  for(const b of correctedBatches){const pid=String(b?.productId||'');if(pid)totals.set(pid,(totals.get(pid)||0)+Math.max(0,Number(b?.stock||0)));}
+  const restoredProducts=(rowsByName.products||[]).map(p=>totals.has(String(p?.id||''))?{...p,stock:totals.get(String(p?.id||''))}:{...p});
+  set('batches',correctedBatches);set('products',restoredProducts);
  }
 }
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});
