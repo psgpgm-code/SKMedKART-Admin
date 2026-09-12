@@ -480,7 +480,11 @@ window.checkMedicineAvailability=()=>{
    const representative=group[0];
    const ids=new Set(group.map(p=>String(p.id)));
    const name=normMedicineName(representative.name);
-   const relatedBatches=batches.filter(b=>ids.has(String(b.productId??'')) || (name && normMedicineName(b.productName)===name));
+   const relatedBatches=batches.filter(b=>{
+     if(ids.has(String(b.productId??'')))return true;
+     const batchNames=[b?.productName,b?.medicineName,b?.medicine,b?.name].map(normMedicineName).filter(Boolean);
+     return !!name && batchNames.includes(name);
+   });
    const usable=relatedBatches.filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED');
    const qty=usable.reduce((sum,b)=>sum+Math.max(0,Number(b.stock||0)),0);
    const productQty=group.reduce((sum,p)=>sum+Math.max(0,Number(p.stock||0)),0);
@@ -507,10 +511,15 @@ function renderSelects(){
  updateBatchOptions();
 }
 function normMedicineName(value){return String(value||'').trim().toLowerCase().replace(/\s+/g,' ');}
-function batchesForProduct(p){
+function batchMatchesProduct(b,p){
  const pid=String(p?.id??'');
  const name=normMedicineName(p?.name);
- return batches.filter(b=>String(b.productId??'')===pid || (name && normMedicineName(b.productName)===name));
+ if(String(b?.productId??'')===pid)return true;
+ const batchNames=[b?.productName,b?.medicineName,b?.medicine,b?.name].map(normMedicineName).filter(Boolean);
+ return !!name && batchNames.includes(name);
+}
+function batchesForProduct(p){
+ return batches.filter(b=>batchMatchesProduct(b,p));
 }
 function effectiveMedicineStock(p){
  const name=normMedicineName(p?.name);
