@@ -1,27 +1,19 @@
-SKMedKART V5.9.30 — FINAL STOCK LEDGER AUDIT
+SKMedKART V5.9.32 — PURCHASE EDIT + LIGHT PERFORMANCE FIX
 
-Purpose:
-This build keeps the existing Offline + Billing Safe mode. Firebase live sync is NOT enabled and no payment/billing plan is required for local billing.
+Changes in this build (only the requested changes):
+1. Added “Edit Purchase” button to each purchase history row.
+2. Editing loads the original purchase into the existing Purchase Entry form.
+3. Correcting quantity safely adjusts the current batch stock by the quantity difference.
+4. Correcting purchase details updates the matching purchase record and its stock movement.
+5. Batch-number changes are blocked when the batch has already been used by a sale/return/order, because changing it then could corrupt stock history.
+6. Changing the medicine/product during an edit is blocked for the same stock-safety reason.
+7. Pending local purchase data is updated together with the edited purchase.
+8. Removed one duplicate full-screen render after a new purchase save, reducing unnecessary work.
+9. Service-worker and script cache versions bumped so the new code is loaded.
 
-Stock source-of-truth fix:
-1. Purchase-backed batches use their recorded PURCHASE movements as the opening quantity.
-2. SALE, RETURN, ORDER_RESERVE and ORDER_CANCEL_RESTOCK movements are applied exactly once.
-3. A billed online order that already reserved stock does not have its SALE movement deducted a second time.
-4. Legacy bills without SALE movements are deducted once from the ledger calculation.
-5. Returned legacy bills without RETURN movements are restored once.
-6. Product stock is rebuilt from batch stock.
-7. Medicine Check and Stock Detection use the same batch/product calculation.
-8. Opening-stock batches without purchase movements retain their stored opening quantity.
-9. A one-time safety backup is created before local stock reconciliation.
-10. Service-worker cache and admin.js cache-busting versions are aligned to V5.9.30.
+No Firebase mode, payment options, billing logic, stock-deduction rules, return rules, order rules, invoice layout, or other requested features were intentionally changed.
 
-Expected examples:
-- Purchase 20 - Bill 3 = 17
-- Purchase 20 - Reserved 3 + billed reserved order = 17
-- Purchase 1 + Purchase 1, no bill = 2
-- Purchase 20 - Sale 3 + Return 3 = 20
-
-Validation:
-- admin.js syntax check: PASS
-- sw.js syntax check: PASS
-- stock-ledger scenario tests: PASS
+Verification:
+- admin.js passes Node JavaScript syntax check.
+- index.html references the new script version.
+- service worker cache/version references the same build version.
