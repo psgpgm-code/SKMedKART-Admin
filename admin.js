@@ -48,6 +48,20 @@ async function ensureFirebase(){
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+function recoverMissingLocalReminders(){
+  try{
+    const current=get('reminders',[]);
+    if(Array.isArray(current)&&current.length)return false;
+    const keys=['skm_offline_pre_migration_backup_v1','skm_offline_backup_v1','skm_full_backup_v1','skm_backup_v1','skm_pharmacy_backup_v1'];
+    for(const key of keys){
+      const raw=localStorage.getItem(key); if(!raw)continue;
+      const backup=JSON.parse(raw); const rows=backup?.collections?.reminders||backup?.reminders;
+      if(Array.isArray(rows)&&rows.length){set('reminders',rows);return true;}
+    }
+  }catch(e){console.warn('Reminder recovery skipped:',e)}
+  return false;
+}
+
 const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 $('notice').innerHTML='<b>📱 Offline + Billing Safe mode</b><br><span class="small">Bills, purchases and stock are saved safely on this phone. Firebase is not used, so quota errors will not affect billing.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
@@ -337,6 +351,7 @@ function repairLocalStockConsistency(){
 }
 
 async function loadAll(force=false){
+ recoverMissingLocalReminders();
  if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=get('reminders',[]);suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
@@ -528,29 +543,49 @@ window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bM
 window.recalculateBillTotals=()=>renderBilling();
 ['bDiscount','bGst'].forEach(id=>{const el=$(id);if(el){el.addEventListener('input',renderBilling);el.addEventListener('change',renderBilling);el.addEventListener('keyup',renderBilling);}});
 window.saveBill=async()=>{
+ const saveBtn=document.querySelector('#saveBillBtn');
+ if(saveBtn?.dataset.saving==='1')return;
  if(!billCart.length)return alert('Add at least one item.');
  const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();
- const items=billCart.map(x=>({...x}));
+ const items=billCart.map(x=>({...x,qty:Math.max(1,Number(x.qty||0))}));
  const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});
  const pending=getPendingBills();for(const b of pending){const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);if(m)nums.push(Number(m[1])||0)}
  const invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0');
- const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Pending Firebase sync'};
+ const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Local'};
  const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
  const stockAlreadyReserved=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
  bill.stockAlreadyReserved=stockAlreadyReserved;
+ if(saveBtn){saveBtn.dataset.saving='1';saveBtn.disabled=true;saveBtn.setAttribute('aria-busy','true');saveBtn.textContent='⏳ Saving Bill...';}
  try{
-  for(const it of items){const b=batches.find(x=>x.id===it.batchId),p=products.find(x=>x.id===it.productId);if(!b||!p||Number(b.stock||0)<Number(it.qty||0)||Number(p.stock||0)<Number(it.qty||0))throw Error('Insufficient stock')}
-  if(!stockAlreadyReserved){for(const it of items){const b=batches.find(x=>x.id===it.batchId);if(!b)throw Error('Batch not found');b.stock=Math.max(0,Number(b.stock||0)-Number(it.qty||0));}const touched=[...new Set(items.map(it=>String(it.productId)))];for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}}
+  // Validate every line against the exact selected batch before changing anything.
+  for(const it of items){
+   const b=batches.find(x=>String(x.id)===String(it.batchId)),p=products.find(x=>String(x.id)===String(it.productId));
+   if(!b||!p)throw Error('Selected medicine/batch is no longer available. Refresh and add it again.');
+   if(expiryStatus(b)==='EXPIRED')throw Error('Expired batch cannot be billed: '+(b.batchNumber||it.batchNumber||it.name));
+   if(!stockAlreadyReserved && Number(b.stock||0)<Number(it.qty||0))throw Error('Insufficient stock in batch '+(b.batchNumber||it.batchNumber||it.name)+'. Available: '+Number(b.stock||0));
+  }
+  if(!stockAlreadyReserved){
+   for(const it of items){const b=batches.find(x=>String(x.id)===String(it.batchId));b.stock=Math.max(0,Number(b.stock||0)-Number(it.qty||0));}
+   const touched=[...new Set(items.map(it=>String(it.productId)))];
+   for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}
+  }
+  // Persist the complete local bill transaction before any UI refresh.
   bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
   const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
-  if(mobile){customers=customers.filter(c=>c.mobile!==mobile);customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
+  if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
   setPendingBills([...getPendingBills(),bill]);
-  bill.syncStatus='Pending Firebase sync';
+  // Clear the cart only after all local writes have succeeded.
+  billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>{if($(id))$(id).value=''});if($('bDiscount'))$('bDiscount').value=0;if($('bGst'))$('bGst').value=0;window.setDiscountType?.('flat');
   renderAll();
   schedulePendingBillSync();
   alert('Bill saved: '+invoiceNumber+'\nSaved safely on this phone.');
-  billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>$(id).value='');renderAll();window.showBillActions?.(bill);
- }catch(e){alert('Could not save bill: '+e.message)}
+  window.showBillActions?.(bill);
+ }catch(e){
+  console.error('Could not save bill:',e);
+  alert('Could not save bill: '+(e?.message||String(e)));
+ }finally{
+  if(saveBtn){saveBtn.disabled=false;saveBtn.removeAttribute('aria-busy');saveBtn.removeAttribute('data-saving');saveBtn.textContent='💾 Save Bill';}
+ }
 };
 
 function assetDataUrl(path){return fetch(path).then(r=>r.ok?r.blob():Promise.reject(new Error('Asset not found: '+path))).then(blob=>new Promise((res,rej)=>{const fr=new FileReader();fr.onload=()=>res(fr.result);fr.onerror=rej;fr.readAsDataURL(blob)}))}
