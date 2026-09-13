@@ -1,3 +1,9 @@
-SKMedKART V5.9.45 - Stock Reconciliation Only Fix
+SKMedKART V5.9.47
+Targeted Stock Detection performance + UI cleanup.
 
-Only the legacy stock reconciliation mismatch was changed: when purchase history exists but its PURCHASE stock movement is missing/incomplete, purchase records are used to rebuild the batch stock, then actual billed sales and returns are applied. Existing opening-stock batches without purchase history are preserved. No billing, purchase entry UI, reminders, orders, restore logic, or other business features were intentionally changed.
+Changes ONLY:
+1. Stock Detection opening/render/search is optimized using prebuilt product/batch indexes to reduce repeated scans on mobile.
+2. Removed the Add Medicine / Opening Stock section from the Stock page UI.
+3. Cache/version references updated so this build loads its own admin.js.
+
+No billing, purchase, stock reconciliation, reminders, orders, reports, or restore logic was intentionally changed.

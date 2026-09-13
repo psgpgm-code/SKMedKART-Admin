@@ -1170,31 +1170,50 @@ window.saveProduct=async()=>{const name=$('pname').value.trim(),price=Number($('
 const schedule=['H','H1'].includes(String($('pSchedule')?.value||'').toUpperCase())?String($('pSchedule').value).toUpperCase():'';const id=String(name).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,100)||'product_'+Date.now(),p={name,cat:$('pcat').value,price,stock,lowStockLevel,barcode,schedule,purchasePrice,mrp,gst,supplier,icon:$('picon').value.trim()||'💊',rx:$('prx').checked,active:true};try{const deleted=getDeletedProducts();deleted.delete(String(id));setDeletedProducts(deleted);if(configured){await runTransaction(db,async tx=>{const pr=doc(db,'products',id),ps=await tx.get(pr);if(stock>0){const br=doc(db,'batches',id+'__'+openingBatch),bs=await tx.get(br);tx.set(br,{...(bs.exists()?bs.data():{}),id:id+'__'+openingBatch,productId:id,productName:name,schedule,batchNumber:openingBatch,expiryDate:openingExpiry,stock:Number(bs.exists()?bs.data().stock||0:0)+stock,mrp:mrp||price,purchasePrice,sellingPrice:price,gst,updatedAt:serverTimestamp(),createdAt:serverTimestamp()},{merge:true})}tx.set(pr,{...p,stock:Number(ps.exists()?ps.data().stock||0:0)+stock,updatedAt:serverTimestamp(),createdAt:ps.exists()?ps.data().createdAt||serverTimestamp():serverTimestamp()},{merge:true})})}else{p.id=id;const i=products.findIndex(x=>x.id===id);if(i>=0){products[i].stock=Number(products[i].stock||0)+stock;Object.assign(products[i],p)}else products.push(p);if(stock>0){const bid=id+'__'+openingBatch,b=batches.find(x=>x.id===bid);if(b)b.stock+=stock;else batches.push({id:bid,productId:id,productName:name,batchNumber:openingBatch,expiryDate:openingExpiry,stock,mrp:price,sellingPrice:price})}p.stock=batches.filter(x=>String(x.productId)===String(id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);set('products',products);set('batches',batches)}alert('Product saved.');['pname','pBarcode','pprice','pPurchase','pMrp','pGst','pstock','pBatch','pExpiry','pSupplier','picon'].forEach(id=>$(id).value='');$('pLow').value=10;$('prx').checked=false;if($('pSchedule'))$('pSchedule').value='';renderAll()}catch(e){alert(e.message)}};
 window.deleteProduct=async id=>{const p=products.find(x=>x.id===id);if(!p)return alert('Product not found.');const related=batches.filter(b=>b.productId===id);if(!confirm('Delete '+(p.name||'this product')+' and its '+related.length+' batch(es)? This is only for a mistaken product upload and cannot be undone.'))return;try{if(configured){const wb=writeBatch(db);related.forEach(b=>wb.delete(doc(db,'batches',b.id)));wb.delete(doc(db,'products',id));await wb.commit();await addDoc(collection(db,'stockMovements'),{type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:serverTimestamp()});}const deleted=getDeletedProducts();deleted.add(String(id));setDeletedProducts(deleted);products=products.filter(x=>String(x.id)!==String(id));batches=batches.filter(b=>String(b.productId)!==String(id));set('products',products);set('batches',batches);if(!configured){const sm=get('stockMovements',[]);sm.push({id:'PDEL'+Date.now(),type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Product and its related batches deleted successfully.');renderAll()}catch(e){alert('Could not delete product: '+e.message)}};
 window.setStockFilter=(filter)=>{const box=$('stockSummary');if(!box)return;box.dataset.filter=['all','out','expiry'].includes(filter)?filter:'all';renderStock();};
-let stockSearchTimer=null; let stockSearchIndex=[];
-function rebuildStockSearchIndex(){stockSearchIndex=products.map(p=>{const bs=batchesForProduct(p);return {p,text:([p.name,p.barcode,p.cat].join(' ')+' '+bs.map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ')).toLowerCase()};});}
-window.filterStockSearch=(value)=>{const box=$('stockSummary');if(!box)return;box.dataset.search=String(value||'');clearTimeout(stockSearchTimer);stockSearchTimer=setTimeout(()=>renderStockListOnly(),120);};
-function getFilteredStock(){const box=$('stockSummary');if(!box)return products;const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();const expiredProducts=products.filter(p=>batchesForProduct(p).some(b=>expiryStatus(b)==='EXPIRED'));let shown;if(search){const index=stockSearchIndex.length===products.length?stockSearchIndex:(rebuildStockSearchIndex(),stockSearchIndex);shown=index.filter(x=>x.text.includes(search)).map(x=>x.p);}else{shown=products.slice();}if(filter==='out')shown=shown.filter(p=>effectiveMedicineStock(p)<=0);if(filter==='expiry')shown=shown.filter(p=>expiredProducts.some(x=>x.id===p.id));return shown;}
+let stockSearchTimer=null; let stockSearchIndex=[]; let stockBatchMap=new Map(); let stockExpiryMap=new Map();
+function rebuildStockIndexes(){
+  stockSearchIndex=[]; stockBatchMap=new Map(); stockExpiryMap=new Map();
+  // Build one product -> batch lookup instead of repeatedly scanning all batches for every product.
+  const byPid=new Map(), byName=new Map();
+  for(const b of batches){
+    const pid=String(b?.productId??''); if(pid){if(!byPid.has(pid))byPid.set(pid,[]);byPid.get(pid).push(b)}
+    const n=normMedicineName(b?.productName); if(n){if(!byName.has(n))byName.set(n,[]);byName.get(n).push(b)}
+  }
+  for(const p of products){
+    const pid=String(p?.id??''), name=normMedicineName(p?.name), seen=new Set(), related=[];
+    for(const b of (byPid.get(pid)||[])){if(!seen.has(String(b.id??''))){seen.add(String(b.id??''));related.push(b)}}
+    if(name) for(const b of (byName.get(name)||[])){if(!seen.has(String(b.id??''))){seen.add(String(b.id??''));related.push(b)}}
+    stockBatchMap.set(pid,related);
+    stockExpiryMap.set(pid,related.some(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b))));
+    stockSearchIndex.push({p,text:([p.name,p.barcode,p.cat].join(' ')+' '+related.map(b=>[b.batchNumber,b.expiryDate].join(' ')).join(' ')).toLowerCase()});
+  }
+}
+window.filterStockSearch=(value)=>{const box=$('stockSummary');if(!box)return;box.dataset.search=String(value||'');clearTimeout(stockSearchTimer);stockSearchTimer=setTimeout(()=>renderStockListOnly(),80);};
+function getStockBatches(p){return stockBatchMap.get(String(p?.id??''))||[];}
+function getFilteredStock(){
+ const box=$('stockSummary');if(!box)return products;
+ const filter=box.dataset.filter||'all',search=String(box.dataset.search||'').trim().toLowerCase();
+ let shown=search?stockSearchIndex.filter(x=>x.text.includes(search)).map(x=>x.p):products.slice();
+ if(filter==='out')shown=shown.filter(p=>effectiveMedicineStock(p)<=0);
+ if(filter==='expiry')shown=shown.filter(p=>stockExpiryMap.get(String(p?.id??'')));
+ return shown;
+}
 function renderStockListOnly(){
- const shown=getFilteredStock(),list=$('stockList');
- if(!list)return;
+ const shown=getFilteredStock(),list=$('stockList'); if(!list)return;
  list.innerHTML=shown.map(p=>{
    const effectiveStock=effectiveMedicineStock(p);const st=effectiveStock<=0?'Out of Stock':effectiveStock<=Number(p.lowStockLevel??10)?'Low Stock':'Available';
-   const exp=batchesForProduct(p).filter(b=>expiryStatus(b)==='EXPIRED');
+   const exp=getStockBatches(p).filter(b=>expiryStatus(b)==='EXPIRED');
    const expText=exp.length?' • '+exp.length+' expired batch(es)':'';
    return '<div class="itemrow"><b>'+esc(p.name)+'</b> • Current stock: '+effectiveStock+'<span class="pill '+(st==='Available'?'':'bad')+'">'+st+'</span><br><span class="small">Alert level: '+Number(p.lowStockLevel??10)+expText+'</span><br><button type="button" class="danger" style="margin-top:8px;width:auto" data-delete-product="'+esc(p.id)+'" onclick="window.deleteProduct(this.getAttribute(&#39;data-delete-product&#39;))">🗑️ Delete Product</button></div>';
  }).join('')||'<div class="small">No matching stock found.</div>';
- // Direct button handler above is used for reliable standalone/PWA clicks.
  const c=$('stockShowing');if(c)c.textContent='Showing '+shown.length+' of '+products.length+' products';
 }
 function renderStock(){
- const box=$('stockSummary');
- if(!box)return;
- const filter=box.dataset.filter||'all';
- const search=String(box.dataset.search||'').trim().toLowerCase();
- rebuildStockSearchIndex();
- const zero=products.filter(p=>Number(p.stock||0)<=0);
- const low=products.filter(p=>Number(p.stock||0)>0&&Number(p.stock||0)<=Number(p.lowStockLevel??10));
- const expiryProducts=products.filter(p=>batchesForProduct(p).some(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b))));
+ const box=$('stockSummary');if(!box)return; const filter=box.dataset.filter||'all';
+ rebuildStockIndexes();
+ const zero=products.filter(p=>effectiveMedicineStock(p)<=0);
+ const low=products.filter(p=>effectiveMedicineStock(p)>0&&effectiveMedicineStock(p)<=Number(p.lowStockLevel??10));
+ const expiryProducts=products.filter(p=>stockExpiryMap.get(String(p?.id??'')));
  box.innerHTML='<div class="grid">'+
    '<button class="'+(filter==='out'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'out\')">🔴 Out of stock: '+zero.length+'</button>'+ 
    '<button class="'+(filter==='expiry'?'ok':'secondary')+'" type="button" onclick="setStockFilter(\'expiry\')">📅 Expiry stock: '+expiryProducts.length+'</button>'+ 
