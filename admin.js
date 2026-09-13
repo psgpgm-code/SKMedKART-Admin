@@ -15,7 +15,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-const configured=false; // V5.9.51 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
+const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -205,7 +205,7 @@ window.adminLogout=()=>{
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 async function migrateFirebaseOnce(){
-  // V5.9.51: cloud migration is permanently disabled. This prevents stale Firebase
+  // V5.9.52: cloud migration is permanently disabled. This prevents stale Firebase
   // orders/products/stock from being re-imported into the local pharmacy database.
   const n=$('notice');
   if(n)n.innerHTML='<b>📱 Hybrid Local-Safe mode</b><br><span class="small">Billing, purchases, stock, reminders and history run locally. Firebase cloud migration is disabled, so old cloud data cannot be injected or consume quota.</span>';
@@ -917,7 +917,21 @@ window.editPurchase=async id=>{
   if(!document.querySelector('#purchaseEditCancel')&&btn){const b=document.createElement('button');b.id='purchaseEditCancel';b.type='button';b.className='secondary';b.style.cssText='width:100%;margin-top:8px';b.textContent='✖ Cancel Edit';b.onclick=window.cancelPurchaseEdit;btn.parentNode.insertBefore(b,btn.nextSibling);}
   show('purchase'); window.scrollTo({top:0,behavior:'smooth'});
 };
+let purchaseActionLock=false,lastPurchaseActionKey='',lastPurchaseActionAt=0;
 window.savePurchase=async()=>{
+  const actionKey=[
+    $('puProductSearch')?.value?.trim()||'', $('puProduct')?.value||'', $('puBatch')?.value?.trim()||'',
+    $('puExpiry')?.value||'', $('puQty')?.value||'', $('puDate')?.value||'', $('puSupplier')?.value?.trim()||'',
+    $('puInvoice')?.value?.trim()||'', $('puCost')?.value||'', $('puGst')?.value||'', $('puMrp')?.value||'',
+    $('puSell')?.value||'', $('puManufacturer')?.value?.trim()||'', editingPurchaseId||''
+  ].join('\u001f');
+  const now=Date.now();
+  // Protect the inventory ledger from rapid double-taps / repeated click events.
+  // Legitimate identical purchases remain allowed after the short duplicate-click window.
+  if(purchaseActionLock || (actionKey===lastPurchaseActionKey && now-lastPurchaseActionAt<2500)) return;
+  purchaseActionLock=true; lastPurchaseActionKey=actionKey; lastPurchaseActionAt=now;
+  const saveBtn=document.querySelector('#purchaseSaveBtn'); if(saveBtn){saveBtn.disabled=true;saveBtn.dataset.busy='1';}
+  setTimeout(()=>{purchaseActionLock=false;if(saveBtn&&saveBtn.dataset.busy==='1'){saveBtn.disabled=false;delete saveBtn.dataset.busy;}},2600);
   const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
   const qty=Math.max(1,Number($('puQty').value)||0),minQty=Math.max(0,Number($('puMinQty')?.value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,manufacturer=$('puManufacturer')?.value.trim()||(product?.manufacturer||product?.manufacturerDetails||''),supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();

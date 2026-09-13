@@ -1,4 +1,4 @@
-SKMedKART V5.9.51 HYBRID LOCAL FINAL
+SKMedKART V5.9.52 HYBRID LOCAL FINAL
 
 Production-safe local-first build. Firebase is disabled for billing, purchase, stock and migration.
 No payment method is required for normal operation.
