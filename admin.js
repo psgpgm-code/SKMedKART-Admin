@@ -361,55 +361,106 @@ function stockLedgerDeltaForBatch(batchId){
  return delta;
 }
 function repairLocalStockConsistency(){
- // One-time legacy reconciliation. Build movement/bill indexes once so opening the app
- // does not repeatedly scan every movement and every bill for every product/batch.
+ // Full stock-integrity reconciliation for legacy/offline data.
+ // Rules: purchase history + purchase movements establish the purchased base;
+ // actual sale/return/order/adjustment movements change that base; missing sale
+ // movements are recovered from bills. Product stock is then the sum of linked
+ // batches. Opening-stock batches with no purchase history remain untouched.
  let changed=false;
  const sm=get('stockMovements',[]);
- const hadBackup=localStorage.getItem('skm_stock_repair_backup_v2');
- if(!hadBackup){try{localStorage.setItem('skm_stock_repair_backup_v2',JSON.stringify({products,batches,bills,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}}
- const byBatch=new Map(), saleRefsByBatch=new Map(), returnRefsByBatch=new Map();
- for(const m of sm){
-   const bid=String(m.batchId||''); if(!bid)continue;
-   const type=String(m.type||'').toUpperCase();
-   if(!byBatch.has(bid))byBatch.set(bid,[]); byBatch.get(bid).push(m);
-   if(type==='SALE'){if(!saleRefsByBatch.has(bid))saleRefsByBatch.set(bid,new Set());saleRefsByBatch.get(bid).add(String(m.reference||''));}
-   if(type==='RETURN'){if(!returnRefsByBatch.has(bid))returnRefsByBatch.set(bid,new Set());returnRefsByBatch.get(bid).add(String(m.reference||''));}
+ const hadBackup=localStorage.getItem('skm_stock_repair_backup_v3');
+ if(!hadBackup){try{localStorage.setItem('skm_stock_repair_backup_v3',JSON.stringify({products,batches,bills,purchases,stockMovements:sm,savedAt:new Date().toISOString()}))}catch(e){console.warn('Stock repair backup failed',e)}}
+ const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
+ const productById=new Map(products.map(p=>[String(p?.id||''),p]).filter(x=>x[0]));
+ const productsByName=new Map();
+ for(const p of products){const n=norm(p?.name);if(!n)continue;if(!productsByName.has(n))productsByName.set(n,[]);productsByName.get(n).push(p)}
+ const batchById=new Map(batches.map(b=>[String(b?.id||''),b]).filter(x=>x[0]));
+ const batchKey=(pid,bn)=>String(pid||'')+'__'+norm(bn);
+ const batchesByKey=new Map();
+ const batchesByNameKey=new Map();
+ for(const b of batches){
+   const bid=String(b?.id||'');if(!bid)continue;
+   const bn=norm(b?.batchNumber||b?.batch);if(!bn)continue;
+   const pid=String(b?.productId||'');
+   if(pid){const k=batchKey(pid,bn);if(!batchesByKey.has(k))batchesByKey.set(k,[]);batchesByKey.get(k).push(b)}
+   const n=norm(b?.productName||b?.medicineName||b?.medicine||b?.name);if(n){const k=n+'__'+bn;if(!batchesByNameKey.has(k))batchesByNameKey.set(k,[]);batchesByNameKey.get(k).push(b)}
  }
- const billsByBatch=new Map();
+ // Repair orphan/mismatched product IDs only when the medicine name maps uniquely.
+ for(const b of batches){
+   const pid=String(b?.productId||''), pname=norm(b?.productName||b?.medicineName||b?.medicine||b?.name);
+   const current=productById.get(pid);
+   if(current)continue;
+   const candidates=productsByName.get(pname)||[];
+   if(candidates.length===1){b.productId=String(candidates[0].id);b.productName=candidates[0].name;changed=true;}
+ }
+ // Rebuild indexes after any safe linkage repairs.
+ batchesByKey.clear();batchesByNameKey.clear();
+ for(const b of batches){const bid=String(b?.id||'');if(!bid)continue;const bn=norm(b?.batchNumber||b?.batch);if(!bn)continue;const pid=String(b?.productId||'');if(pid){const k=batchKey(pid,bn);if(!batchesByKey.has(k))batchesByKey.set(k,[]);batchesByKey.get(k).push(b)}const n=norm(b?.productName||b?.medicineName||b?.medicine||b?.name);if(n){const k=n+'__'+bn;if(!batchesByNameKey.has(k))batchesByNameKey.set(k,[]);batchesByNameKey.get(k).push(b)}}
+ const findBatch=(pid,name,bn,bid='')=>{
+   if(bid&&batchById.has(String(bid)))return batchById.get(String(bid));
+   const nb=norm(bn);if(!nb)return null;
+   const exactPid=batchesByKey.get(batchKey(pid,nb))||[];if(exactPid.length===1)return exactPid[0];
+   const byName=batchesByNameKey.get(norm(name)+'__'+nb)||[];if(byName.length===1)return byName[0];
+   return null;
+ };
+ const purchaseQtyByBatch=new Map(),movementPurchaseQtyByBatch=new Map();
+ for(const pu of purchases){
+   const q=Math.max(0,Number(pu?.qty||pu?.quantity||0));if(!q)continue;
+   const b=findBatch(String(pu?.productId||pu?.productID||''),pu?.productName||pu?.medicine||pu?.name,pu?.batchNumber||pu?.batch,'');
+   if(b){const bid=String(b.id);purchaseQtyByBatch.set(bid,(purchaseQtyByBatch.get(bid)||0)+q)}
+ }
+ const saleRefsByBatch=new Map(),returnRefsByBatch=new Map(),movementNetByBatch=new Map();
+ const addRef=(map,bid,ref)=>{if(!ref)return;if(!map.has(bid))map.set(bid,new Set());map.get(bid).add(ref)};
+ for(const m of sm){
+   const type=String(m?.type||'').toUpperCase();if(!['PURCHASE','SALE','RETURN','ORDER_RESERVE','ORDER_CANCEL_RESTOCK','STOCK_ADJUSTMENT','ADJUSTMENT','OPENING_STOCK'].includes(type))continue;
+   const b=findBatch(String(m?.productId||''),m?.productName||m?.medicine||'',m?.batchNumber||m?.batch,m?.batchId||'');if(!b)continue;
+   const bid=String(b.id),q=Number(m?.qty||0);
+   if(type==='PURCHASE'){movementPurchaseQtyByBatch.set(bid,(movementPurchaseQtyByBatch.get(bid)||0)+Math.max(0,q));continue}
+   if(type==='SALE'){
+     const ref=String(m?.reference||'');const bill=ref?bills.find(x=>String(x?.invoiceNumber||'')===ref):null;
+     if(bill?.stockAlreadyReserved)continue;
+     addRef(saleRefsByBatch,bid,ref);movementNetByBatch.set(bid,(movementNetByBatch.get(bid)||0)+q);continue;
+   }
+   if(type==='RETURN'){addRef(returnRefsByBatch,bid,String(m?.reference||''));movementNetByBatch.set(bid,(movementNetByBatch.get(bid)||0)+q);continue}
+   movementNetByBatch.set(bid,(movementNetByBatch.get(bid)||0)+q);
+ }
+ // Recover missing stock movements from bills, using batch number/name when the
+ // historical bill item has an old/missing batchId. Returned bills are net zero.
  for(const bill of bills){
-   const inv=String(bill.invoiceNumber||''); if(!inv)continue;
-   for(const it of (bill.items||[])){
-     const bid=String(it.batchId||''); if(!bid)continue;
-     const q=Math.max(0,Number(it.qty||it.quantity||0)); if(!q)continue;
-     if(!billsByBatch.has(bid))billsByBatch.set(bid,[]);
-     billsByBatch.get(bid).push({inv,q,returned:!!bill.returned});
+   const inv=String(bill?.invoiceNumber||'');if(!inv)continue;
+   for(const it of (bill?.items||[])){
+     const b=findBatch(String(it?.productId||''),it?.name||it?.productName||it?.medicine||'',it?.batchNumber||it?.batch,it?.batchId||'');if(!b)continue;
+     const bid=String(b.id),q=Math.max(0,Number(it?.qty||it?.quantity||0));if(!q)continue;
+     const saleRefs=saleRefsByBatch.get(bid)||new Set(),returnRefs=returnRefsByBatch.get(bid)||new Set();
+     if(!bill.returned){if(!saleRefs.has(inv))movementNetByBatch.set(bid,(movementNetByBatch.get(bid)||0)-q)}
+     else if(saleRefs.has(inv)&&!returnRefs.has(inv)){movementNetByBatch.set(bid,(movementNetByBatch.get(bid)||0)+q)}
    }
  }
  const totalByProduct=new Map();
  for(const b of batches){
-   const bid=String(b.id||''),rows=byBatch.get(bid)||[];
-   const purchaseQty=rows.filter(m=>String(m.type||'').toUpperCase()==='PURCHASE').reduce((n,m)=>n+Math.max(0,Number(m.qty||0)),0);
+   const bid=String(b?.id||'');if(!bid)continue;
+   const historyPurchaseQty=purchaseQtyByBatch.get(bid)||0;
+   // Purchase history is the business record. Movement PURCHASE rows are only a
+   // fallback for legacy batches that have no purchase record; this prevents a
+   // duplicated movement (for example after an old restore) from adding stock twice.
+   const purchaseBase=historyPurchaseQty>0?historyPurchaseQty:(movementPurchaseQtyByBatch.get(bid)||0);
    let expected;
-   if(purchaseQty>0){
-     let net=0;
-     for(const m of rows)if(String(m.type||'').toUpperCase()!=='PURCHASE')net+=Number(m.qty||0);
-     const saleRefs=saleRefsByBatch.get(bid)||new Set(),returnRefs=returnRefsByBatch.get(bid)||new Set();
-     for(const x of (billsByBatch.get(bid)||[])){if(!saleRefs.has(x.inv))net-=x.q;if(x.returned&&!returnRefs.has(x.inv))net+=x.q;}
-     expected=Math.max(0,purchaseQty+net);
-   }else expected=Math.max(0,Number(b.stock||0));
-   if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true;}
-   const pid=String(b.productId||''); if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected);
+   if(purchaseBase>0)expected=Math.max(0,purchaseBase+(movementNetByBatch.get(bid)||0));
+   else expected=Math.max(0,Number(b?.stock||0));
+   if(Math.abs(Number(b?.stock||0)-expected)>0.000001){b.stock=expected;changed=true}
+   const pid=String(b?.productId||'');if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected);
  }
  for(const p of products){
-   const total=totalByProduct.get(String(p.id));
-   if(total!==undefined&&Math.abs(Number(p.stock||0)-total)>0.000001){p.stock=total;changed=true;}
+   const pid=String(p?.id||''),total=totalByProduct.get(pid);
+   if(total!==undefined&&Math.abs(Number(p?.stock||0)-total)>0.000001){p.stock=total;changed=true}
  }
- if(changed){set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v3','yes');}
+ if(changed){set('batches',batches);set('products',products)}
+ localStorage.setItem('skm_stock_reconciled_v5','yes');
 }
 
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);if(localStorage.getItem('skm_stock_repair_v3_done')!=='yes'){repairLocalStockConsistency();localStorage.setItem('skm_stock_repair_v3_done','yes')}renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);if(localStorage.getItem('skm_stock_repair_v5_done')!=='yes'){repairLocalStockConsistency();localStorage.setItem('skm_stock_repair_v5_done','yes')}renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
@@ -797,59 +848,16 @@ window.downloadBackup=async()=>{try{const status=$('restoreStatus');if(status)st
 async function restoreData(data){
  if(!data?.collections||typeof data.collections!=='object')throw Error('Invalid SKMedKART backup file.');
  if(configured){
-  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];for(let i=0;i<rows.length;i+=400){const wb=writeBatch(db);rows.slice(i,i+400).forEach((row,n)=>{const copy={...row};const id=String(copy.id||uid());delete copy.id;wb.set(doc(db,name,id),copy,{merge:true});});await wb.commit();}}
+  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];for(let i=0;i<rows.length;i+=400){const wb=writeBatch(db);rows.slice(i,i+400).forEach(row=>{const copy={...row};const id=String(copy.id||uid());delete copy.id;wb.set(doc(db,name,id),copy,{merge:true});});await wb.commit();}}
  }else{
-  // Restore is a snapshot import. On a different phone the same purchase may have
-  // a different local ID, so ID-only duplicate detection is not safe. Identify an
-  // already-present purchase by its stable business fields and remove only that
-  // purchase quantity from the restored batch. This makes restore idempotent across
-  // phones without deleting the purchase record itself.
-  const beforePurchases=get('purchases',[]);
-  const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
-  const purchaseFingerprint=pu=>{
-    const invoice=norm(pu?.purchaseInvoiceNo||pu?.invoiceNo||pu?.invoice||'');
-    const product=norm(pu?.productId||'');
-    const batch=norm(pu?.batchNumber||pu?.batch||'');
-    const date=norm(pu?.purchaseDate||pu?.date||'');
-    const supplier=norm(pu?.supplier||pu?.supplierName||'');
-    const medicine=norm(pu?.productName||pu?.medicine||pu?.name||'');
-    const qty=Math.max(0,Number(pu?.qty||pu?.quantity||0));
-    return [invoice,product,batch,date,supplier,medicine,qty].join('|');
-  };
-  const beforePurchaseIds=new Set((Array.isArray(beforePurchases)?beforePurchases:[]).map(x=>String(x?.id||'')).filter(Boolean));
-  const beforePurchaseFingerprints=new Set((Array.isArray(beforePurchases)?beforePurchases:[]).map(purchaseFingerprint).filter(x=>x.replace(/\|/g,'').length));
-  const rowsByName={};
-  for(const name of backupCollections)rowsByName[name]=Array.isArray(data.collections[name])?data.collections[name]:[];
-  const restoredPurchases=rowsByName.purchases||[];
-  const duplicatePurchaseQtyByBatch=new Map();
-  for(const pu of restoredPurchases){
-    const pid=String(pu?.id||'');
-    const fp=purchaseFingerprint(pu);
-    const duplicate=!!(pid&&beforePurchaseIds.has(pid)) || (!!fp&&beforePurchaseFingerprints.has(fp));
-    if(!duplicate)continue;
-    const productId=String(pu?.productId||'').trim();
-    const batchNumber=String(pu?.batchNumber||pu?.batch||'').trim();
-    if(!productId||!batchNumber)continue;
-    const bid=productId+'__'+batchNumber;
-    duplicatePurchaseQtyByBatch.set(bid,(duplicatePurchaseQtyByBatch.get(bid)||0)+Math.max(0,Number(pu?.qty||pu?.quantity||0)));
-  }
-  const correctedBatches=(rowsByName.batches||[]).map(row=>{
-    const bid=String(row?.id||'') || (String(row?.productId||'')+'__'+String(row?.batchNumber||row?.batch||''));
-    const dup=duplicatePurchaseQtyByBatch.get(bid)||0;
-    return dup?{...row,stock:Math.max(0,Number(row?.stock||0)-dup)}:row;
-  });
-  for(const name of backupCollections){
-    if(name==='batches')set(name,correctedBatches);
-    else if(name==='products')continue;
-    else if(name==='orders')set('orders',rowsByName[name]);
-    else set(name,rowsByName[name]);
-  }
-  // Product stock must equal the corrected batch total, so the duplicate purchase
-  // cannot reappear through the product-level stock field.
-  const totals=new Map();
-  for(const b of correctedBatches){const pid=String(b?.productId||'');if(pid)totals.set(pid,(totals.get(pid)||0)+Math.max(0,Number(b?.stock||0)));}
-  const restoredProducts=(rowsByName.products||[]).map(p=>totals.has(String(p?.id||''))?{...p,stock:totals.get(String(p?.id||''))}:{...p});
-  set('products',restoredProducts);
+  // Restore is a snapshot: the selected backup is loaded exactly as saved. We do
+  // not subtract "duplicate" purchases from the snapshot, because that can turn a
+  // correct batch quantity into an incorrect one. The stock-integrity reconciliation
+  // below handles legacy missing movement/batch links without double-adding stock.
+  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];set(name,rows)}
+  products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
+  repairLocalStockConsistency();
+  localStorage.setItem('skm_stock_repair_v5_done','yes');
  }
 }
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});
