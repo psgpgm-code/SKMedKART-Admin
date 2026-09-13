@@ -15,7 +15,7 @@ const BUILTIN_FIREBASE_CONFIG={apiKey:'AIzaSyBdvOUiTVoBJHPE418iZqNzYftiN9yjooA',
 const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
-const configured=false; // FINAL SAFE MODE: keep all working data local; never contact Firebase or consume quota.
+const configured=false; // V5.9.51 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -205,59 +205,15 @@ window.adminLogout=()=>{
 ['email','password'].forEach(id=>$(id)?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();window.adminLogin()}}));
 for(const b of document.querySelectorAll('.tab'))b.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(x=>x.classList.add('hidden'));$(b.dataset.view).classList.remove('hidden')};for(const b of document.querySelectorAll('.payBtn'))b.onclick=()=>{document.querySelectorAll('.payBtn').forEach(x=>x.classList.remove('active'));b.classList.add('active');$('bPayment').value=b.dataset.pay};
 async function migrateFirebaseOnce(){
-  const FLAG='skm_offline_migration_v1_done';
-  if(localStorage.getItem(FLAG)==='yes')return {done:true,skipped:true};
-  // Keep a local safety copy before importing anything. Never delete existing data.
-  try{localStorage.setItem('skm_offline_pre_migration_backup_v1',JSON.stringify({
-    products:get('products',[]),batches:get('batches',[]),purchases:get('purchases',[]),bills:get('bills',[]),
-    customers:get('customers',[]),reminders:get('reminders',[]),suppliers:get('suppliers',[]),orders:get('orders',[]),
-    stockMovements:get('stockMovements',[]),savedAt:new Date().toISOString()
-  }))}catch(e){console.warn('Pre-migration local backup failed:',e)}
+  // V5.9.51: cloud migration is permanently disabled. This prevents stale Firebase
+  // orders/products/stock from being re-imported into the local pharmacy database.
   const n=$('notice');
-  if(n)n.innerHTML='<b>☁️ One-time data migration</b><br><span class="small">Importing your existing Firebase stock, batches, purchases and bills into this phone. Live Firebase mode will not be enabled.</span>';
-  try{
-    const [appMod,fsMod]=await Promise.all([
-      import('https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js'),
-      import('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js')
-    ]);
-    const app=appMod.initializeApp(cfg,'SKMedKARTOfflineMigration');
-    const fdb=fsMod.getFirestore(app);
-    const names=['products','batches','purchases','bills','customers','reminders','suppliers','orders','stockMovements'];
-    const normalize=v=>{
-      if(v&&typeof v.toDate==='function')return v.toDate().toISOString();
-      if(Array.isArray(v))return v.map(normalize);
-      if(v&&typeof v==='object'){const o={};for(const [k,x] of Object.entries(v))o[k]=normalize(x);return o}
-      return v;
-    };
-    const remote={};
-    for(const name of names){
-      const snap=await fsMod.getDocs(fsMod.collection(fdb,name));
-      remote[name]=snap.docs.map(d=>normalize({id:d.id,...d.data()}));
-    }
-    const merge=(localRows,remoteRows)=>{
-      const out=new Map();
-      for(const row of (Array.isArray(localRows)?localRows:[])){const id=String(row?.id||'');if(id)out.set(id,row);else out.set('__local_'+out.size,row)}
-      for(const row of (Array.isArray(remoteRows)?remoteRows:[])){const id=String(row?.id||'');if(id)out.set(id,row);else out.set('__remote_'+out.size,row)}
-      return [...out.values()];
-    };
-    for(const name of names){
-      const local=name==='orders'?get('orders',[]):get(name,[]);
-      const combined=merge(local,remote[name]);
-      set(name,combined);
-    }
-    localStorage.setItem(FLAG,'yes');
-    localStorage.setItem('skm_offline_migration_completed_at',new Date().toISOString());
-    if(n)n.innerHTML='<b>📱 Offline mode active</b><br><span class="small">Existing Firebase data has been copied to this phone. Billing, purchases and stock now work locally without live Firebase.</span>';
-    return {done:true,skipped:false,counts:Object.fromEntries(names.map(x=>[x,remote[x].length]))};
-  }catch(e){
-    console.error('One-time Firebase migration failed:',e);
-    if(n)n.innerHTML='<b>📱 Offline mode active</b><br><span class="small">No cloud migration was completed. Existing local data was preserved. Connect to the internet once and reload to retry the migration.</span>';
-    return {done:false,error:e};
-  }
+  if(n)n.innerHTML='<b>📱 Hybrid Local-Safe mode</b><br><span class="small">Billing, purchases, stock, reminders and history run locally. Firebase cloud migration is disabled, so old cloud data cannot be injected or consume quota.</span>';
+  return {done:true,skipped:true,disabled:true};
 }
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
-const PENDING_BILLS_KEY='skm_online_pending_bills_v1';
+const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
 function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
 function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
 function pendingSaleTotals(){
@@ -363,8 +319,9 @@ function stockLedgerDeltaForBatch(batchId){
 function repairLocalStockConsistency(){
  // Single-source inventory reconciliation for offline mode.
  // Purchase records define inbound quantity; non-returned bills define sales;
- // active order reservations define held quantity; explicit adjustments are
- // applied once. Duplicate movement records are never allowed to double-count.
+ // online-order reservations are NOT part of this offline ledger. Explicit
+ // adjustments are applied once. Duplicate movement records are never allowed
+ // to double-count.
  let changed=false;
  const sm=Array.isArray(get('stockMovements',[]))?get('stockMovements',[]):[];
  const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
@@ -442,18 +399,21 @@ function repairLocalStockConsistency(){
  const addSale=(b,q)=>{if(!b||q<=0)return;saleQtyByBatch.set(String(b.id),(saleQtyByBatch.get(String(b.id))||0)+q)};
  for(const bill of billGroups.values()){
    if(bill?.returned)continue;
-   const order=bill?.sourceOrderId?currentOrders.find(o=>String(o.id)===String(bill.sourceOrderId)):null;
-   const reservationHandled=!!(bill?.stockAlreadyReserved&&order&&orderHasStockReservation(order)&&!order.stockRestored);
    for(const it of (bill?.items||[])){
      const q=Math.max(0,Number(it?.qty??it?.quantity??0));if(!q)continue;
      const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);
      const b=prod?resolveBatch(prod,it?.batchNumber||it?.batch,it?.batchId||''):null;
-     // If the bill was created from an already-reserved order, reservation is the
-     // inventory deduction. Otherwise the billed quantity is a sale deduction.
-     if(!reservationHandled&&b){addSale(b,q);continue}
-     if(reservationHandled)continue;
+     if(b){addSale(b,q);continue}
+     // Legacy bills may not contain a usable batch id. Allocate the sale against
+     // purchase-backed batches for the same medicine without double-counting.
      const arr=prod?(purchaseBatchesByProduct.get(String(prod.id))||[]):[];let remaining=q;
-     for(const candidate of arr){if(remaining<=0)break;const already=saleQtyByBatch.get(String(candidate.id))||0;const available=Math.max(0,(purchaseQtyByBatch.get(String(candidate.id))||0)-already);const take=Math.min(available,remaining);if(take>0){addSale(candidate,take);remaining-=take}}
+     for(const candidate of arr){
+       if(remaining<=0)break;
+       const already=saleQtyByBatch.get(String(candidate.id))||0;
+       const available=Math.max(0,(purchaseQtyByBatch.get(String(candidate.id))||0)-already);
+       const take=Math.min(available,remaining);
+       if(take>0){addSale(candidate,take);remaining-=take}
+     }
    }
  }
  // Online-order reservations are intentionally excluded from offline stock reconciliation.
@@ -718,7 +678,7 @@ window.saveBill=async()=>{
  const invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0');
  const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Local'};
  const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
- const stockAlreadyReserved=!!(sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored);
+ const stockAlreadyReserved=!!(configured&&sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored); // Local-safe mode never trusts legacy online reservations.
  bill.stockAlreadyReserved=stockAlreadyReserved;
  if(saveBtn){saveBtn.dataset.saving='1';saveBtn.disabled=true;saveBtn.setAttribute('aria-busy','true');saveBtn.textContent='⏳ Saving Bill...';}
  try{
@@ -899,7 +859,7 @@ window.calculatePurchaseGst=()=>{
   return {base,rate,total};
 };
 ['puCost','puGst'].forEach(id=>$(id)?.addEventListener('input',window.calculatePurchaseGst));
-const PENDING_PURCHASES_KEY='skm_online_pending_purchases_v1';
+const PENDING_PURCHASES_KEY='skm_local_pending_purchases_v2';
 function getPendingPurchases(){return get(PENDING_PURCHASES_KEY,[])}
 function setPendingPurchases(v){set(PENDING_PURCHASES_KEY,v)}
 function mergePendingPurchases(remote){const map=new Map((remote||[]).map(x=>[String(x.id||''),x]));for(const x of getPendingPurchases()){const k=String(x.id||'');if(k&&!map.has(k))map.set(k,{...x,syncStatus:'Pending Firebase sync'})}return [...map.values()].sort((a,b)=>t(b.createdAt||b.purchaseDate)-t(a.createdAt||a.purchaseDate))}
@@ -1089,6 +1049,7 @@ function normalizeRestockRows(rows){
  return out;
 }
 async function reserveOrderStock(id,o,status,note){
+  if(!configured){ Object.assign(o,{status,pharmacistNote:note,stockReserved:false,stockDeducted:false,stockReservationDisabled:true,updatedAt:new Date().toISOString()}); set('orders',currentOrders); return true; }
  if(o.stockRestored)return false;
  if(orderHasStockReservation(o))return false;
  const rows=normalizeRestockRows((o.items||[]).map(x=>({...x,qty:Math.max(0,Number(x.qty??x.quantity??1))})));
@@ -1126,6 +1087,7 @@ async function reserveOrderStock(id,o,status,note){
  return true;
 }
 async function restoreCancelledOrderStock(id,o,updatedNote){
+  if(!configured){ Object.assign(o,{status:'Cancelled',pharmacistNote:updatedNote,cancelledAt:new Date().toISOString(),stockRestored:false,stockRestoreStatus:'Online-order stock reservation is disabled in local-safe mode'}); set('orders',currentOrders); return {restored:false,reason:'local-order-stock-disabled'}; }
  if(o.stockRestored)return {restored:false,reason:'already-restored'};
  const raw=getOrderReservedItems(o);if(!raw.length)return {restored:false,reason:'not-reserved'};
  const reserved=normalizeRestockRows(raw);if(!reserved.length)return {restored:false,reason:'not-reserved'};
@@ -1152,7 +1114,7 @@ window.cancelOrder=async id=>{
   if(!o)return alert('Order not found.');
   if(o.status==='Billed')return alert('This order has already been billed. Use bill history / return bill instead of cancelling the order.');
   if(o.status==='Cancelled')return alert('Order is already cancelled.');
-  if(!confirm('Cancel this customer order? Reserved stock will be automatically restored to inventory.'))return;
+  if(!confirm('Cancel this customer order? Online-order stock reservation is disabled; this will not change pharmacy stock.'))return;
   try{
     const note=(o.pharmacistNote||'').trim();
     const updatedNote=(note?note+'\n':'')+'Order cancelled by admin.';
@@ -1189,7 +1151,7 @@ window.updateOrder=async id=>{
  try{
   const reserveStatuses=['Confirmed','Ready','Out for Delivery'];
   if(reserveStatuses.includes(st)&&existing&&!orderHasStockReservation(existing)){
-    await reserveOrderStock(id,existing,st,note);alert('Order status updated. Stock has been reserved for this online order.');
+    await reserveOrderStock(id,existing,st,note);alert('Order status updated. Online-order stock reservation is disabled, so pharmacy stock was not changed.');
   }else if(configured)await updateDoc(doc(db,'orders',id),{status:st,pharmacistNote:note,updatedAt:serverTimestamp()});
   else{const o=currentOrders.find(x=>x.id===id);if(o){o.status=st;o.pharmacistNote=note;set('orders',currentOrders)}}
   renderAll();
