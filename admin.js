@@ -1278,10 +1278,20 @@ function scheduleStats(p){
  const salesValue=sales.reduce((n,x)=>n+Number(x.item.qty||x.item.quantity||0)*Number(x.item.price||0),0);
  return {purchaseQty,purchaseValue,salesQty,salesValue,pur,sales};
 }
+let scheduleSearchTimer=null;
+window.scheduleSearchInput=value=>{
+ clearTimeout(scheduleSearchTimer);
+ scheduleSearchTimer=setTimeout(()=>renderScheduleList(),60);
+};
 function renderScheduleList(){
  const list=$('scheduleList'),summary=$('scheduleSummary');if(!list)return;
  const q=String($('scheduleSearch')?.value||'').trim().toLowerCase();
- const shown=products.filter(p=>scheduleValue(p)===scheduleFilter&&(!q||String(p.name||'').toLowerCase().includes(q)));
+ const shown=products.filter(p=>{
+   if(scheduleValue(p)!==scheduleFilter)return false;
+   if(!q)return true;
+   const hay=(String(p.name||'')+' '+String(p.barcode||'')+' '+String(p.batchNumber||'')).toLowerCase();
+   return hay.includes(q);
+ });
  document.querySelectorAll('#scheduleHBtn,#scheduleH1Btn,#scheduleNoneBtn').forEach(b=>b.classList.remove('primary'));
  const active=$(scheduleFilter==='H'?'scheduleHBtn':scheduleFilter==='H1'?'scheduleH1Btn':'scheduleNoneBtn');if(active)active.classList.add('primary');
  summary.textContent=scheduleFilter?(shown.length+' medicine(s) in Schedule '+scheduleFilter):(shown.length+' medicine(s) are not classified as H/H1');
