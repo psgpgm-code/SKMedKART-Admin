@@ -1009,7 +1009,50 @@ window.renderPurchases=()=>{
  box.innerHTML='<div class="small">No purchases or products found for “'+esc(input.value)+'”.</div>';
 };
 
-function purchaseRow(p){const pid=esc(p.id||'');return '<div class="itemrow"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class="small">'+(p.manufacturer||p.manufacturerDetails?('Manufacturer: '+esc(p.manufacturer||p.manufacturerDetails)+' • '):'')+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span><div class="actions"><button class="secondary" type="button" data-edit-purchase="'+pid+'" onclick="window.editPurchase(this.dataset.editPurchase)">✏️ Edit Purchase</button></div></div>'}
+function purchaseRow(p){const pid=esc(p.id||'');return '<div class=\"itemrow\"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class=\"small\">'+(p.manufacturer||p.manufacturerDetails?('Manufacturer: '+esc(p.manufacturer||p.manufacturerDetails)+' • '):'')+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span><div class=\"actions\"><button class=\"secondary\" type=\"button\" data-edit-purchase=\"'+pid+'\" onclick=\"window.editPurchase(this.dataset.editPurchase)\">✏️ Edit Purchase</button><button class=\"danger\" type=\"button\" data-delete-purchase=\"'+pid+'\" onclick=\"window.deletePurchase(this.dataset.deletePurchase)\">🗑️ Delete Purchase</button></div></div>'}
+
+window.deletePurchase=async id=>{
+ const purchase=purchases.find(x=>String(x.id)===String(id));
+ if(!purchase)return alert('Purchase record not found.');
+ const product=products.find(x=>String(x.id)===String(purchase.productId));
+ const productName=purchase.productName||product?.name||'this medicine';
+ const batchNumber=String(purchase.batchNumber||purchase.batch||'');
+ const qty=Number(purchase.qty||0);
+ if(!qty)return alert('This purchase has no valid quantity to delete.');
+ const batch=batches.find(x=>String(x.id)===String(purchase.batchId||'') || (String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber));
+ if(!confirm('Delete this purchase entry?\n\nMedicine: '+productName+'\nBatch: '+(batchNumber||'-')+'\nQty: '+qty+'\n\nThe purchase record and its stock contribution will be removed. This cannot be undone.'))return;
+ try{
+   const allMoves=get('stockMovements',[]);
+   const remainingPurchases=purchases.filter(x=>String(x.id)!==String(purchase.id));
+   // Safety check: do not remove an inbound purchase if existing genuine sales on the
+   // same product/batch would then exceed the remaining purchase quantity.
+   const remainingInbound=remainingPurchases.filter(x=>String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber).reduce((n,x)=>n+Math.max(0,Number(x.qty||0)),0);
+   let sold=0;
+   const seenBills=new Set();
+   for(const bill of bills){
+     const key=String(bill?.invoiceNumber||bill?.id||''); if(!key||seenBills.has(key)||bill?.returned)continue; seenBills.add(key);
+     for(const it of (bill.items||[])){
+       if(String(it?.productId||'')!==String(purchase.productId))continue;
+       if(String(it?.batchId||'')!==String(purchase.batchId||'') && String(it?.batchNumber||it?.batch||'')!==batchNumber)continue;
+       sold+=Math.max(0,Number(it?.qty??it?.quantity??0));
+     }
+   }
+   if(sold>remainingInbound){
+     return alert('This purchase cannot be deleted safely because '+sold+' unit(s) from this product/batch are already billed, while the remaining purchase history contains only '+remainingInbound+' unit(s). Use Edit Purchase instead of deleting this record.');
+   }
+   if(configured){
+     alert('Firebase/cloud mode is disabled for this build. Purchase deletion is local-only.');
+     return;
+   }
+   purchases=remainingPurchases;
+   set('purchases',purchases);
+   setPendingPurchases(getPendingPurchases().filter(x=>String(x.id)!==String(purchase.id)));
+   set('stockMovements',allMoves.filter(m=>String(m.id)!==String(purchase.id+'_SM')));
+   repairLocalStockConsistency();
+   loadAll();
+   alert('Purchase deleted successfully. Stock was recalculated automatically.');
+ }catch(e){alert('Could not delete purchase: '+e.message)}
+};
 function renderBatches(){$('batchList').innerHTML=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{const st=expiryStatus(b);return '<div class=\"itemrow\"><b>'+esc(b.productName||b.productId)+'</b><span class=\"pill '+(st==='OK'?'':'bad')+'\">'+st+'</span><br><span class=\"small\">Batch '+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+' • MRP '+money(b.mrp)+' • Sell '+money(b.sellingPrice)+'</span><br><button class=\"danger\" style=\"margin-top:8px;width:auto\" onclick=\"deleteBatch(\''+esc(b.id)+'\')\">🗑️ Delete This Batch</button></div>'}).join('')||'<div class=\"small\">No batches yet. Add stock through Purchase or Opening Stock.</div>'}
 
 window.deleteBatch=async (id)=>{const b=batches.find(x=>x.id===id);if(!b)return alert('Batch not found.');if(!confirm('Delete batch '+(b.batchNumber||'')+' for '+(b.productName||'this medicine')+'? This cannot be undone. Current stock '+Number(b.stock||0)+' will be removed from inventory.'))return;try{if(configured){await runTransaction(db,async tx=>{const br=doc(db,'batches',id),pr=doc(db,'products',b.productId),bs=await tx.get(br),ps=await tx.get(pr);if(!bs.exists())throw Error('Batch not found.');const live=bs.data();if(ps.exists()){const next=Math.max(0,Number(ps.data().stock||0)-Number(live.stock||0));tx.update(pr,{stock:next,updatedAt:serverTimestamp()});}tx.delete(br);tx.set(doc(collection(db,'stockMovements')),{type:'BATCH_DELETE',productId:live.productId||b.productId,batchId:id,batchNumber:live.batchNumber||b.batchNumber,qty:-Number(live.stock||0),reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:serverTimestamp()});});}else{const qty=Number(b.stock||0),prod=products.find(x=>x.id===b.productId);batches=batches.filter(x=>x.id!==id);if(prod)prod.stock=batches.filter(x=>String(x.productId)===String(prod.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push({id:'DEL'+Date.now(),type:'BATCH_DELETE',productId:b.productId,batchId:id,batchNumber:b.batchNumber,qty:-qty,reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Batch deleted successfully. Product stock has been recalculated.');renderAll()}catch(e){alert('Could not delete batch: '+e.message)}};
