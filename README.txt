@@ -1,6 +1,2 @@
-SKMedKART V5.9.52 HYBRID LOCAL FINAL
-
-Production-safe local-first build. Firebase is disabled for billing, purchase, stock and migration.
-No payment method is required for normal operation.
-Online-order stock reservation is disabled. Genuine bills drive sales stock.
-Use Backup/Restore for manual data transfer between devices.
+SKMedKART V5.9.54
+Low Stock alerts are grouped by the same Purchase category (Human/Veterinary/Baby/Pet/Health/Devices/Cosmetics). Other features are unchanged.
