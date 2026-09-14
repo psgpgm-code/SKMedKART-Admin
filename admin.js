@@ -919,6 +919,7 @@ window.editPurchase=async id=>{
   show('purchase'); window.scrollTo({top:0,behavior:'smooth'});
 };
 let purchaseActionLock=false,lastPurchaseActionKey='',lastPurchaseActionAt=0;
+// V5.9.55 PURCHASE DATA INTEGRITY: Purchase History owns supplier/cost/GST; product/batch masters must not overwrite prior purchase records.
 window.savePurchase=async()=>{
   const actionKey=[
     $('puProductSearch')?.value?.trim()||'', $('puProduct')?.value||'', $('puBatch')?.value?.trim()||'',
@@ -959,13 +960,19 @@ window.savePurchase=async()=>{
         const oldQty=Number(purchase.qty||0),delta=qty-oldQty;
         if(delta<0&&Number(oldBatch.stock||0)<Math.abs(delta))return alert('Cannot reduce this purchase quantity because the batch does not have enough remaining stock. Some quantity has already been sold/used.');
         oldBatch.stock=Math.max(0,Number(oldBatch.stock||0)+delta);
-        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total});
+        // Keep purchase-specific supplier/cost/GST immutable in Purchase History.
+        // A later purchase of the same product+batch must not overwrite the earlier
+        // purchase's commercial data. Batch keeps only operational/display values.
+        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
       }
       const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
       const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id)); if(pi>=0)purchases[pi]=updated;
       const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:newBid,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
       originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer});
-      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0; originalProduct.purchasePrice=gst.base; originalProduct.purchaseGstRate=gst.rate; originalProduct.purchasePriceWithGst=gst.total; originalProduct.gst=gst.rate;
+      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0;
+      // IMPORTANT: purchase cost/GST belong to the individual purchase record.
+      // Never overwrite product-master purchase values while editing a purchase.
+      // This prevents one purchase from changing another purchase's supplier/rate/GST context.
       originalProduct.stock=batches.filter(x=>String(x.productId)===String(originalProduct.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
       set('stockMovements',newStockMovements);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases(getPendingPurchases().map(x=>String(x.id)===String(updated.id)?updated:x));
       editingPurchaseId=''; const cancel=$('purchaseEditCancel');if(cancel)cancel.remove();const btn=document.querySelector('#purchaseSaveBtn');if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
@@ -975,8 +982,14 @@ window.savePurchase=async()=>{
     const productId=product?.id||('product_'+uid());
     const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
     if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)} else {product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails})}
-    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst} else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
-    product.stock=batches.filter(x=>String(x.productId)===String(product.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{manufacturer:purchase.manufacturer||product.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||product.manufacturerDetails||'',purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});
+    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){
+      b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
+      // Do NOT overwrite existing batch supplier/purchase cost/GST. Those values
+      // are purchase-entry specific and remain in Purchase History.
+    } else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    product.stock=batches.filter(x=>String(x.productId)===String(product.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);if(purchase.sellingPrice)product.price=purchase.sellingPrice;product.manufacturer=purchase.manufacturer||product.manufacturer||'';product.manufacturerDetails=purchase.manufacturerDetails||product.manufacturerDetails||'';
+    // Purchase-specific cost/GST are deliberately NOT copied into the product master.
+    // Every Purchase History row keeps its own supplier, rate and GST from the bill.
     purchases.unshift(purchase); const sm=get('stockMovements',[]);sm.push({id:purchase.id+'_SM',type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});
     set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
     alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.\nSaved safely on this phone.');
