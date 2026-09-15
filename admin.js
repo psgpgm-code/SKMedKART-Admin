@@ -16,6 +16,35 @@ const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
+
+// Supabase is used ONLY as a public catalogue mirror. It never stores or reads billing, purchase, customer, reminder or stock-ledger records.
+const SKM_SUPABASE_URL='https://uyobhzkcvfnrioppwkrv.supabase.co';
+const SKM_SUPABASE_PUBLISHABLE_KEY='sb_publishable_5zmngPN80O2CPgtNhGNhEQ_elEQpz9E';
+const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
+let catalogPublishTimer=null,catalogPublishBusy=false;
+function catalogRows(){
+  const rows=new Map();
+  for(const p of (products||[])){
+    const id=String(p?.id||'').trim(); if(!id||!String(p?.name||'').trim())continue;
+    const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
+    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,active:p.active!==false,updated_at:new Date().toISOString()});
+  }
+  return [...rows.values()];
+}
+async function publishCustomerCatalog(force=false){
+  if(catalogPublishBusy)return;
+  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+  catalogPublishBusy=true;
+  try{
+    const payload=catalogRows();
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Authorization':'Bearer '+SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:payload})});
+    if(!r.ok){const text=await r.text();throw Error(text||('HTTP '+r.status));}
+    const status=$('catalogSyncStatus');if(status)status.textContent='Customer catalogue updated: '+payload.length+' products • '+new Date().toLocaleTimeString('en-IN');
+  }catch(e){console.warn('Customer catalogue sync skipped:',e);const status=$('catalogSyncStatus');if(status)status.textContent='Customer catalogue sync pending. Billing/Purchase/Stock remain fully offline.'}
+  finally{catalogPublishBusy=false}
+}
+function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
+function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -71,7 +100,7 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>{localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
