@@ -1,405 +1,728 @@
-/* SKMedKART V5.9.56 — deterministic offline stock ledger repair
-   Inbound = Purchase History
-   Outbound = non-returned Bill History
-   Return = returned bill (sale is cancelled)
-   Opening stock without purchase history is preserved
-   This file is additive: it does not replace admin.js.
+/* SKMedKART V5.9.56 FINAL - deterministic offline stock ledger repair
+   Purchase History = IN
+   Non-returned Bill History = OUT
+   Returned Bill = cancelled sale
+   Opening stock without purchase history is preserved.
 */
 (function(){
 'use strict';
 
-const KEY='skm_pharmacy_v2_';
-const read=(k,d)=>{try{return JSON.parse(localStorage.getItem(KEY+k)||JSON.stringify(d))}catch{return d}};
-const write=(k,v)=>localStorage.setItem(KEY+k,JSON.stringify(v));
-const list=k=>{const v=read(k,[]);return Array.isArray(v)?v:[]};
-const n=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
-const qty=v=>Math.max(0,Number(v)||0);
+const K='skm_pharmacy_v2_';
+const R='skm_stock_reconciled_v9';
 
-function reconcileStock(){
-  let products=list('products');
-  let purchases=list('purchases');
-  let batches=list('batches');
-  const bills=list('bills');
+let timer=0;
+let running=false;
 
-  if(!products.length && !purchases.length && !batches.length && !bills.length)return false;
-
-  const productById=new Map();
-  const productByName=new Map();
-
-  for(const p of products){
-    const id=String(p?.id||'');
-    if(id)productById.set(id,p);
-
-    const name=n(p?.name);
-    if(name){
-      if(!productByName.has(name))productByName.set(name,[]);
-      productByName.get(name).push(p);
-    }
+const A=k=>{
+  try{
+    const v=JSON.parse(
+      localStorage.getItem(K+k)||'[]'
+    );
+    return Array.isArray(v)?v:[];
+  }catch{
+    return [];
   }
+};
 
-  const resolveProduct=(id,name)=>{
-    const p=productById.get(String(id||''));
-    if(p)return p;
+const N=v=>
+  String(v??'')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g,' ');
 
-    const same=productByName.get(n(name))||[];
-    return same.length===1?same[0]:null;
-  };
+const Q=v=>{
+  const n=Number(v);
+  return Number.isFinite(n)&&n>0?n:0;
+};
 
-  const batchById=new Map();
 
-  for(const b of batches){
-    const id=String(b?.id||'');
-    if(id)batchById.set(id,b);
-  }
+function reconcile(){
 
-  const resolveBatch=(p,batchNumber,batchId)=>{
-    if(!p)return null;
+  if(running)return false;
 
-    const pid=String(p.id||'');
-    const pn=n(p.name);
-    const bn=n(batchNumber);
+  running=true;
 
-    const direct=batchById.get(String(batchId||''));
+  try{
 
-    if(direct){
-      const sameProduct=
-        String(direct.productId||'')===pid ||
-        (!!pn &&
-        n(
-          direct.productName||
-          direct.medicineName||
-          direct.medicine||
-          direct.name
-        )===pn);
+    const products=A('products');
+    const purchases=A('purchases');
+    const batches=A('batches');
+    const bills=A('bills');
+    const moves=A('stockMovements');
 
-      const sameBatch=
-        !bn ||
-        n(direct.batchNumber||direct.batch)===bn;
-
-      if(sameProduct&&sameBatch)return direct;
+    if(
+      !products.length &&
+      !purchases.length &&
+      !batches.length &&
+      !bills.length
+    ){
+      return false;
     }
 
-    if(!bn)return null;
 
-    const matches=batches.filter(b=>{
-      const sameProduct=
-        String(b.productId||'')===pid ||
-        (!!pn &&
-        n(
-          b.productName||
-          b.medicineName||
-          b.medicine||
-          b.name
-        )===pn);
+    /* --------------------------------
+       PRODUCT RESOLUTION
+    -------------------------------- */
 
-      return sameProduct &&
-        n(b.batchNumber||b.batch)===bn;
-    });
+    const pById=new Map();
+    const pByName=new Map();
 
-    return matches.length===1?matches[0]:null;
-  };
+    for(const p of products){
 
-  /* 1) Purchase ledger -> exact inbound quantity per batch. */
+      const id=String(p?.id||'');
 
-  const purchaseQty=new Map();
-  const purchaseBatchesByProduct=new Map();
+      if(id)
+        pById.set(id,p);
 
-  for(const pu of purchases){
+      const name=N(p?.name);
 
-    const q=qty(pu?.qty??pu?.quantity);
+      if(name){
 
-    if(!q)continue;
+        if(!pByName.has(name))
+          pByName.set(name,[]);
 
-    const p=resolveProduct(
-      pu?.productId||pu?.productID,
-      pu?.productName||pu?.medicine||pu?.name
-    );
-
-    if(!p)continue;
-
-    const bn=pu?.batchNumber||pu?.batch||'';
-
-    let b=resolveBatch(
-      p,
-      bn,
-      pu?.batchId||''
-    );
-
-    /*
-      Legacy repair:
-      create missing batch link only when purchase
-      has a real batch number.
-    */
-
-    if(!b && bn){
-
-      const id=String(p.id)+'__'+String(bn);
-
-      b={
-        id,
-        productId:String(p.id),
-        productName:p.name||'',
-        batchNumber:String(bn),
-        expiryDate:pu?.expiryDate||'',
-        stock:0,
-        mrp:qty(pu?.mrp||p.mrp||p.price),
-        sellingPrice:qty(pu?.sellingPrice||p.price),
-        purchasePrice:qty(pu?.purchasePrice),
-        purchaseGstRate:qty(pu?.purchaseGstRate),
-        purchasePriceWithGst:qty(pu?.purchasePriceWithGst)
-      };
-
-      batches.push(b);
-      batchById.set(id,b);
-    }
-
-    if(!b)continue;
-
-    const bid=String(b.id);
-
-    purchaseQty.set(
-      bid,
-      (purchaseQty.get(bid)||0)+q
-    );
-
-    const pid=String(p.id);
-
-    if(!purchaseBatchesByProduct.has(pid))
-      purchaseBatchesByProduct.set(pid,[]);
-
-    if(!purchaseBatchesByProduct.get(pid).includes(b))
-      purchaseBatchesByProduct.get(pid).push(b);
-  }
-
-  /*
-    2) Bill ledger.
-
-    One invoice counts once even if duplicate records exist.
-    Returned bill = zero net sale.
-  */
-
-  const billsByInvoice=new Map();
-
-  for(const bill of bills){
-
-    const key=String(
-      bill?.invoiceNumber||
-      bill?.id||
-      ''
-    );
-
-    if(!key)continue;
-
-    const old=billsByInvoice.get(key);
-
-    if(!old){
-
-      billsByInvoice.set(key,bill);
-
-    }else{
-
-      if((bill?.items||[]).length>
-         (old?.items||[]).length){
-
-        billsByInvoice.set(key,bill);
-
-      }else if(bill?.returned){
-
-        old.returned=true;
+        pByName.get(name).push(p);
       }
     }
-  }
 
-  const soldByBatch=new Map();
 
-  const addSold=(b,q)=>{
+    const product=(id,name)=>{
 
-    if(!b||q<=0)return;
-
-    const id=String(b.id);
-
-    soldByBatch.set(
-      id,
-      (soldByBatch.get(id)||0)+q
-    );
-  };
-
-  const unresolved=[];
-
-  for(const bill of billsByInvoice.values()){
-
-    if(bill?.returned)continue;
-
-    for(const item of (bill?.items||[])){
-
-      const q=qty(
-        item?.qty??
-        item?.quantity
+      const p=pById.get(
+        String(id||'')
       );
 
-      if(!q)continue;
+      if(p)return p;
 
-      const p=resolveProduct(
-        item?.productId,
-        item?.name||
-        item?.productName||
-        item?.medicine
+      const matches=
+        pByName.get(N(name))||[];
+
+      return matches.length===1
+        ?matches[0]
+        :null;
+    };
+
+
+    /* --------------------------------
+       BATCH RESOLUTION
+    -------------------------------- */
+
+    const bById=new Map();
+    const bByKey=new Map();
+
+    for(const b of batches){
+
+      const id=String(b?.id||'');
+
+      if(id)
+        bById.set(id,b);
+
+      const bn=N(
+        b?.batchNumber||
+        b?.batch
       );
 
-      const b=resolveBatch(
+      const pn=N(
+        b?.productName||
+        b?.medicineName||
+        b?.medicine||
+        b?.name
+      );
+
+      if(bn&&pn){
+
+        const key=
+          pn+'__'+bn;
+
+        if(!bByKey.has(key))
+          bByKey.set(key,[]);
+
+        bByKey.get(key).push(b);
+      }
+    }
+
+
+    const batch=(p,bn,bid)=>{
+
+      if(!p)return null;
+
+      const direct=
+        bById.get(
+          String(bid||'')
+        );
+
+      const wanted=N(bn);
+
+      if(direct){
+
+        const sameProduct=
+          String(direct.productId||'')===
+            String(p.id||'') ||
+
+          N(
+            direct.productName||
+            direct.medicineName||
+            direct.medicine||
+            direct.name
+          )===N(p.name);
+
+        if(
+          sameProduct &&
+          (
+            !wanted ||
+            N(
+              direct.batchNumber||
+              direct.batch
+            )===wanted
+          )
+        ){
+          return direct;
+        }
+      }
+
+
+      if(!wanted)
+        return null;
+
+
+      const key=
+        N(p.name)+'__'+wanted;
+
+      const matches=
+        bByKey.get(key)||[];
+
+      return matches.length===1
+        ?matches[0]
+        :null;
+    };
+
+
+    /* --------------------------------
+       PURCHASE LEDGER
+       PURCHASE = STOCK IN
+    -------------------------------- */
+
+    const inQty=new Map();
+    const purchaseBatches=new Map();
+    const seenPurchase=new Set();
+
+
+    for(const pu of purchases){
+
+      const purchaseId=
+        String(pu?.id||'');
+
+      if(
+        purchaseId &&
+        seenPurchase.has(purchaseId)
+      ){
+        continue;
+      }
+
+      if(purchaseId)
+        seenPurchase.add(purchaseId);
+
+
+      const q=Q(
+        pu?.qty??
+        pu?.quantity
+      );
+
+      if(!q)
+        continue;
+
+
+      const p=product(
+        pu?.productId||
+        pu?.productID,
+
+        pu?.productName||
+        pu?.medicine||
+        pu?.name
+      );
+
+      if(!p)
+        continue;
+
+
+      const bn=
+        pu?.batchNumber||
+        pu?.batch||
+        '';
+
+
+      let b=batch(
         p,
-        item?.batchNumber||
-        item?.batch||
-        '',
-        item?.batchId||
+        bn,
+        pu?.batchId||''
+      );
+
+
+      /*
+        If a purchase has a real batch number
+        but the batch record is missing,
+        rebuild the batch link.
+      */
+
+      if(!b&&bn){
+
+        const bid=
+          String(p.id)+'__'+
+          String(bn);
+
+
+        b={
+          id:bid,
+
+          productId:
+            String(p.id),
+
+          productName:
+            p.name||'',
+
+          batchNumber:
+            String(bn),
+
+          expiryDate:
+            pu?.expiryDate||'',
+
+          stock:0,
+
+          mrp:
+            Q(
+              pu?.mrp||
+              p.mrp||
+              p.price
+            ),
+
+          sellingPrice:
+            Q(
+              pu?.sellingPrice||
+              p.price
+            ),
+
+          purchasePrice:
+            Q(
+              pu?.purchasePrice
+            ),
+
+          purchaseGstRate:
+            Q(
+              pu?.purchaseGstRate
+            ),
+
+          purchasePriceWithGst:
+            Q(
+              pu?.purchasePriceWithGst
+            )
+        };
+
+
+        batches.push(b);
+
+        bById.set(
+          bid,
+          b
+        );
+      }
+
+
+      if(!b)
+        continue;
+
+
+      const bid=
+        String(b.id);
+
+
+      inQty.set(
+        bid,
+        (inQty.get(bid)||0)+q
+      );
+
+
+      const pid=
+        String(p.id);
+
+
+      if(!purchaseBatches.has(pid))
+        purchaseBatches.set(
+          pid,
+          []
+        );
+
+
+      if(
+        !purchaseBatches
+          .get(pid)
+          .includes(b)
+      ){
+
+        purchaseBatches
+          .get(pid)
+          .push(b);
+      }
+    }
+
+
+    /* --------------------------------
+       BILL LEDGER
+       BILL = STOCK OUT
+       RETURNED BILL = NO STOCK OUT
+    -------------------------------- */
+
+    const byInvoice=new Map();
+
+
+    for(const bill of bills){
+
+      const key=String(
+        bill?.invoiceNumber||
+        bill?.id||
         ''
       );
 
-      if(b && purchaseQty.has(String(b.id))){
+      if(!key)
+        continue;
 
-        addSold(b,q);
+
+      const old=
+        byInvoice.get(key);
+
+
+      if(!old){
+
+        byInvoice.set(
+          key,
+          bill
+        );
 
       }else{
 
-        unresolved.push({
+        /*
+          Duplicate invoice records:
+          keep the record containing
+          the larger item list.
+        */
+
+        if(
+          (bill?.items||[]).length >
+          (old?.items||[]).length
+        ){
+
+          byInvoice.set(
+            key,
+            bill
+          );
+
+        }else if(
+          bill?.returned
+        ){
+
+          old.returned=true;
+        }
+      }
+    }
+
+
+    const sold=new Map();
+
+
+    const addSold=(b,q)=>{
+
+      if(!b||q<=0)
+        return;
+
+      const id=
+        String(b.id);
+
+      sold.set(
+        id,
+        (sold.get(id)||0)+q
+      );
+    };
+
+
+    /*
+      Process every non-returned bill.
+    */
+
+    for(
+      const bill
+      of byInvoice.values()
+    ){
+
+      if(bill?.returned)
+        continue;
+
+
+      for(
+        const it
+        of (bill?.items||[])
+      ){
+
+        const q=Q(
+          it?.qty??
+          it?.quantity
+        );
+
+        if(!q)
+          continue;
+
+
+        const p=product(
+          it?.productId||
+          it?.productID,
+
+          it?.name||
+          it?.productName||
+          it?.medicine
+        );
+
+
+        if(!p)
+          continue;
+
+
+        const b=batch(
           p,
-          q
-        });
-      }
-    }
-  }
 
-  /*
-    3) Legacy sales with missing/wrong batch IDs.
+          it?.batchNumber||
+          it?.batch||
+          '',
 
-    Allocate only within same medicine and only against
-    purchased quantity.
+          it?.batchId||
+          ''
+        );
 
-    FEFO = earliest expiry first.
-  */
 
-  for(const row of unresolved){
+        /*
+          Exact batch match.
+        */
 
-    if(!row.p)continue;
-
-    const candidates=
-      (purchaseBatchesByProduct.get(
-        String(row.p.id)
-      )||[])
-      .slice()
-      .sort((a,b)=>
-        String(a.expiryDate||'')
-          .localeCompare(
-            String(b.expiryDate||'')
-          ) ||
-        String(a.batchNumber||'')
-          .localeCompare(
-            String(b.batchNumber||'')
+        if(
+          b &&
+          inQty.has(
+            String(b.id)
           )
-      );
+        ){
 
-    let remaining=row.q;
+          addSold(
+            b,
+            q
+          );
 
-    for(const b of candidates){
+          continue;
+        }
 
-      if(remaining<=0)break;
 
-      const id=String(b.id);
+        /*
+          Legacy bill:
+          missing/wrong batch ID.
 
-      const purchased=
-        purchaseQty.get(id)||0;
+          Allocate only from the same
+          medicine's purchased batches.
 
-      const alreadySold=
-        soldByBatch.get(id)||0;
+          FEFO = earliest expiry first.
+        */
 
-      const available=
-        Math.max(
-          0,
-          purchased-alreadySold
-        );
+        const candidates=
+          (
+            purchaseBatches.get(
+              String(p.id)
+            )||[]
+          )
+          .slice()
+          .sort(
+            (x,y)=>
+              String(
+                x?.expiryDate||
+                '9999-12-31'
+              ).localeCompare(
+                String(
+                  y?.expiryDate||
+                  '9999-12-31'
+                )
+              ) ||
 
-      const take=
-        Math.min(
-          available,
-          remaining
-        );
+              N(
+                x?.batchNumber||
+                x?.batch
+              ).localeCompare(
+                N(
+                  y?.batchNumber||
+                  y?.batch
+                )
+              )
+          );
 
-      if(take>0){
 
-        addSold(b,take);
+        let left=q;
 
-        remaining-=take;
+
+        for(
+          const c
+          of candidates
+        ){
+
+          if(left<=0)
+            break;
+
+
+          const id=
+            String(c.id);
+
+
+          const available=
+            Math.max(
+              0,
+
+              (inQty.get(id)||0) -
+              (sold.get(id)||0)
+            );
+
+
+          const take=
+            Math.min(
+              available,
+              left
+            );
+
+
+          if(take>0){
+
+            addSold(
+              c,
+              take
+            );
+
+            left-=take;
+          }
+        }
       }
     }
-  }
 
-  /*
-    4) Explicit stock adjustments.
-  */
 
-  const adjustmentByBatch=new Map();
+    /* --------------------------------
+       STOCK ADJUSTMENTS
+    -------------------------------- */
 
-  for(const m of list('stockMovements')){
+    const adj=new Map();
 
-    const type=
-      String(m?.type||'')
-        .toUpperCase();
 
-    if(
-      type!=='STOCK_ADJUSTMENT' &&
-      type!=='ADJUSTMENT'
-    )continue;
+    for(
+      const m
+      of moves
+    ){
 
-    const p=resolveProduct(
-      m?.productId,
-      m?.productName||
-      m?.medicine
-    );
+      const type=
+        String(
+          m?.type||''
+        ).toUpperCase();
 
-    const b=resolveBatch(
-      p,
-      m?.batchNumber||
-      m?.batch||
-      '',
-      m?.batchId||
-      ''
-    );
 
-    if(!b)continue;
+      if(
+        type!=='STOCK_ADJUSTMENT' &&
+        type!=='ADJUSTMENT'
+      ){
+        continue;
+      }
 
-    const id=String(b.id);
 
-    adjustmentByBatch.set(
-      id,
-      (adjustmentByBatch.get(id)||0)+
-      Number(m?.qty||0)
-    );
-  }
+      const p=product(
+        m?.productId||
+        m?.productID,
 
-  /*
-    5) Rebuild batch stock.
-  */
-
-  let changed=false;
-
-  const productTotal=new Map();
-
-  for(const b of batches){
-
-    const id=String(b?.id||'');
-
-    if(!id)continue;
-
-    let expected;
-
-    if(purchaseQty.has(id)){
-
-      expected=Math.max(
-        0,
-        (purchaseQty.get(id)||0)-
-        (soldByBatch.get(id)||0)+
-        (adjustmentByBatch.get(id)||0)
+        m?.productName||
+        m?.medicine||
+        m?.name
       );
+
+
+      const b=batch(
+        p,
+
+        m?.batchNumber||
+        m?.batch||
+        '',
+
+        m?.batchId||
+        ''
+      );
+
+
+      if(!b)
+        continue;
+
+
+      const id=
+        String(b.id);
+
+
+      adj.set(
+        id,
+        (adj.get(id)||0)+
+        Number(m?.qty||0)
+      );
+    }
+
+
+    /* --------------------------------
+       REBUILD BATCH STOCK
+    -------------------------------- */
+
+    let changed=false;
+
+    const totals=new Map();
+
+
+    for(
+      const b
+      of batches
+    ){
+
+      const id=
+        String(b?.id||'');
+
+
+      if(!id)
+        continue;
+
+
+      let expected;
+
+
+      /*
+        Purchase-backed batch:
+        PURCHASE - SALES + ADJUSTMENTS
+      */
+
+      if(
+        inQty.has(id)
+      ){
+
+        expected=
+          Math.max(
+            0,
+
+            (inQty.get(id)||0) -
+            (sold.get(id)||0) +
+            (adj.get(id)||0)
+          );
+
+      }else{
+
+        /*
+          Opening stock:
+          no purchase history.
+
+          Preserve existing physical stock.
+        */
+
+        expected=
+          Q(b?.stock);
+      }
+
 
       if(
         Math.abs(
@@ -408,199 +731,232 @@ function reconcileStock(){
         )>0.000001
       ){
 
-        b.stock=expected;
+        b.stock=
+          expected;
 
         changed=true;
       }
 
-    }else{
 
-      /*
-        Opening stock:
-        no purchase history means preserve
-        existing physical stock.
-      */
+      const pid=
+        String(
+          b?.productId||''
+        );
 
-      expected=qty(b.stock);
+
+      if(pid){
+
+        totals.set(
+          pid,
+          (totals.get(pid)||0)+
+          expected
+        );
+      }
     }
 
-    const pid=String(
-      b.productId||''
-    );
 
-    if(pid){
+    /* --------------------------------
+       PRODUCT MASTER STOCK
+       = TOTAL OF BATCH STOCK
+    -------------------------------- */
 
-      productTotal.set(
-        pid,
-        (productTotal.get(pid)||0)+
-        expected
-      );
-    }
-  }
-
-  /*
-    6) Product master stock =
-       total of its batches.
-  */
-
-  for(const p of products){
-
-    const pid=String(
-      p?.id||''
-    );
-
-    if(!productTotal.has(pid))
-      continue;
-
-    const expected=Math.max(
-      0,
-      productTotal.get(pid)||0
-    );
-
-    if(
-      Math.abs(
-        Number(p.stock||0)-
-        expected
-      )>0.000001
+    for(
+      const p
+      of products
     ){
 
-      p.stock=expected;
+      const id=
+        String(
+          p?.id||''
+        );
 
-      changed=true;
+
+      if(
+        !totals.has(id)
+      ){
+        continue;
+      }
+
+
+      const expected=
+        Math.max(
+          0,
+          totals.get(id)||0
+        );
+
+
+      if(
+        Math.abs(
+          Number(p.stock||0)-
+          expected
+        )>0.000001
+      ){
+
+        p.stock=
+          expected;
+
+        changed=true;
+      }
     }
-  }
 
-  if(changed){
 
-    write(
-      'batches',
-      batches
-    );
+    /* --------------------------------
+       SAVE ONLY WHEN SOMETHING CHANGED
+    -------------------------------- */
 
-    write(
-      'products',
-      products
-    );
+    if(changed){
+
+      localStorage.setItem(
+        K+'batches',
+        JSON.stringify(batches)
+      );
+
+      localStorage.setItem(
+        K+'products',
+        JSON.stringify(products)
+      );
+    }
+
 
     localStorage.setItem(
-      'skm_stock_reconciled_v8',
-      'yes'
+      R,
+      new Date().toISOString()
     );
-  }
 
-  return changed;
-}
 
-function tryWrap(name){
-
-  const fn=window[name];
-
-  if(
-    typeof fn!=='function'||
-    fn.__SKM_V956
-  )return;
-
-  const wrapped=async function(){
-
-    const result=
-      await fn.apply(
-        this,
-        arguments
-      );
-
-    try{
-
-      reconcileStock();
-
-    }catch(e){
-
-      console.error(
-        'SKMedKART stock reconcile:',
-        e
-      );
-    }
-
-    return result;
-  };
-
-  wrapped.__SKM_V956=true;
-
-  wrapped.__original=fn;
-
-  window[name]=wrapped;
-}
-
-function install(){
-
-  try{
-
-    reconcileStock();
+    return changed;
 
   }catch(e){
 
     console.error(
-      'SKMedKART V5.9.56:',
+      'SKMedKART stock reconcile:',
       e
     );
+
+    return false;
+
+  }finally{
+
+    running=false;
   }
-
-  /*
-    admin.js is a module.
-    Its window functions may appear
-    after this script executes.
-  */
-
-  let tries=0;
-
-  const timer=setInterval(()=>{
-
-    tries++;
-
-    tryWrap('savePurchase');
-    tryWrap('saveBill');
-    tryWrap('returnBill');
-
-    if(tries>=30){
-
-      clearInterval(timer);
-
-      try{
-
-        reconcileStock();
-
-      }catch(e){}
-    }
-
-  },500);
-
-  setTimeout(()=>{
-
-    try{
-
-      reconcileStock();
-
-    }catch(e){}
-
-  },2000);
 }
 
-if(
-  document.readyState===
-  'loading'
-){
 
-  document.addEventListener(
-    'DOMContentLoaded',
-    install,
-    {once:true}
+/* --------------------------------
+   WATCH LOCAL STORAGE CHANGES
+
+   admin.js is an ES module.
+   Therefore we do NOT depend on
+   window.saveBill/savePurchase.
+-------------------------------- */
+
+function schedule(){
+
+  clearTimeout(timer);
+
+  timer=setTimeout(
+    ()=>{
+      reconcile();
+    },
+    150
   );
-
-}else{
-
-  install();
 }
+
+
+try{
+
+  const nativeSet=
+    Storage.prototype.setItem;
+
+
+  Storage.prototype.setItem=
+    function(key,value){
+
+      const out=
+        nativeSet.call(
+          this,
+          key,
+          value
+        );
+
+
+      if(
+        this===localStorage &&
+        typeof key==='string' &&
+        key.startsWith(K) &&
+        /^(products|purchases|batches|bills|stockMovements)$/
+          .test(
+            key.slice(K.length)
+          )
+      ){
+
+        schedule();
+      }
+
+
+      return out;
+    };
+
+}catch(e){
+
+  console.warn(
+    'SKMedKART storage hook:',
+    e
+  );
+}
+
+
+try{
+
+  const nativeRemove=
+    Storage.prototype.removeItem;
+
+
+  Storage.prototype.removeItem=
+    function(key){
+
+      const out=
+        nativeRemove.call(
+          this,
+          key
+        );
+
+
+      if(
+        this===localStorage &&
+        typeof key==='string' &&
+        key.startsWith(K) &&
+        /^(products|purchases|batches|bills|stockMovements)$/
+          .test(
+            key.slice(K.length)
+          )
+      ){
+
+        schedule();
+      }
+
+
+      return out;
+    };
+
+}catch(e){}
+
+
+/* --------------------------------
+   PUBLIC MANUAL RECONCILE
+-------------------------------- */
 
 window.SKMedKARTStockReconcileV956=
-  reconcileStock;
+  reconcile;
+
+
+/* Initial repair */
+
+schedule();
+
+setTimeout(
+  schedule,
+  1000
+);
 
 })();
