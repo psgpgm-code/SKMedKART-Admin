@@ -72,6 +72,68 @@ async function ensureFirebase(){
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
 const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+function persistPurchaseBundle(next){
+  const names=['stockMovements','batches','products','purchases'];
+  const old=new Map(names.map(n=>[n,localStorage.getItem(K+n)]));
+  try{
+    set('stockMovements',next.stockMovements);
+    set('batches',next.batches);
+    set('products',next.products);
+    set('purchases',next.purchases);
+  }catch(err){
+    for(const [n,v] of old){try{if(v===null)localStorage.removeItem(K+n);else localStorage.setItem(K+n,v)}catch(e){}}
+    throw err;
+  }
+}
+
+// Recover purchase-history rows only when the purchase ledger row is missing but
+// its original PURCHASE stock movement still exists. This preserves current stock
+// and never invents a purchase from an opening-stock batch.
+function recoverMissingLocalPurchases(){
+  if(configured||!Array.isArray(purchases)||!Array.isArray(batches)||!Array.isArray(products))return false;
+  const moves=Array.isArray(get('stockMovements',[]))?get('stockMovements',[]):[];
+  if(!moves.length)return false;
+  const ids=new Set(purchases.map(x=>String(x?.id||'')));
+  const recovered=[];
+  for(const m of moves){
+    if(String(m?.type||'').toUpperCase()!=='PURCHASE')continue;
+    const mid=String(m?.id||'');
+    if(!mid.endsWith('_SM'))continue;
+    const pid=String(m?.productId||'');
+    const purchaseId=mid.slice(0,-3);
+    if(!purchaseId||ids.has(purchaseId))continue;
+    const product=products.find(x=>String(x?.id||'')===pid);
+    const batch=batches.find(x=>String(x?.id||'')===String(m?.batchId||'') || (String(x?.productId||'')===pid && String(x?.batchNumber||x?.batch||'')===String(m?.batchNumber||'')));
+    if(!product||!batch)continue;
+    const qty=Math.max(0,Number(m?.qty||0));
+    if(!qty)continue;
+    const gstRate=Number(batch?.purchaseGstRate||0);
+    const withGst=Number(m?.purchasePriceWithGst||batch?.purchasePriceWithGst||0);
+    const base=Number(batch?.purchasePrice||0) || (gstRate>0?withGst/(1+gstRate/100):withGst);
+    const row={
+      id:purchaseId, productId:pid, productName:batch?.productName||product.name||'',
+      category:batch?.category||batch?.cat||product.category||product.cat||'Human Medicines',
+      cat:batch?.category||batch?.cat||product.category||product.cat||'Human Medicines',
+      schedule:batch?.schedule||product.schedule||'',
+      qty, batchNumber:batch?.batchNumber||batch?.batch||m?.batchNumber||'',
+      expiryDate:batch?.expiryDate||'', manufacturer:batch?.manufacturer||batch?.manufacturerDetails||product.manufacturer||'',
+      manufacturerDetails:batch?.manufacturerDetails||batch?.manufacturer||product.manufacturerDetails||'',
+      supplier:batch?.supplier||batch?.supplierName||'', invoice:m?.reference||'',
+      purchaseDate:(m?.createdAt?String(m.createdAt).slice(0,10):''), purchasePrice:base,
+      purchaseGstRate:gstRate, purchasePriceWithGst:withGst||base+(base*gstRate/100),
+      mrp:Number(batch?.mrp||product.mrp||0), sellingPrice:Number(batch?.sellingPrice||product.price||0),
+      minQty:Number(product?.lowStockLevel||10), recovered:true, recoveredAt:new Date().toISOString()
+    };
+    purchases.unshift(row);ids.add(purchaseId);recovered.push(row);
+  }
+  if(recovered.length){
+    set('purchases',purchases);
+    console.warn('Recovered missing purchase-history rows:',recovered.length);
+    return true;
+  }
+  return false;
+}
+
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -449,7 +511,7 @@ function repairLocalStockConsistency(){
 
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);recoverMissingLocalPurchases();repairLocalStockConsistency();renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
@@ -974,7 +1036,7 @@ window.savePurchase=async()=>{
       // Never overwrite product-master purchase values while editing a purchase.
       // This prevents one purchase from changing another purchase's supplier/rate/GST context.
       originalProduct.stock=batches.filter(x=>String(x.productId)===String(originalProduct.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
-      set('stockMovements',newStockMovements);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases(getPendingPurchases().map(x=>String(x.id)===String(updated.id)?updated:x));
+      persistPurchaseBundle({stockMovements:newStockMovements,batches,products,purchases});setPendingPurchases(getPendingPurchases().map(x=>String(x.id)===String(updated.id)?updated:x));
       editingPurchaseId=''; const cancel=$('purchaseEditCancel');if(cancel)cancel.remove();const btn=document.querySelector('#purchaseSaveBtn');if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
       ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer','puSupplier','puInvoice'].forEach(id=>{if($(id))$(id).value=''});if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';if($('puDate'))$('puDate').value=today();
       renderAll(); alert('Purchase updated successfully. Stock was adjusted safely.'); return;
@@ -991,7 +1053,7 @@ window.savePurchase=async()=>{
     // Purchase-specific cost/GST are deliberately NOT copied into the product master.
     // Every Purchase History row keeps its own supplier, rate and GST from the bill.
     purchases.unshift(purchase); const sm=get('stockMovements',[]);sm.push({id:purchase.id+'_SM',type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});
-    set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
+    persistPurchaseBundle({stockMovements:sm,batches,products,purchases});setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
     alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.\nSaved safely on this phone.');
     savePurchaseHeaderDefaults();
     ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';loadPurchaseHeaderDefaults();renderAll()
@@ -1059,9 +1121,8 @@ window.deletePurchase=async id=>{
      return;
    }
    purchases=remainingPurchases;
-   set('purchases',purchases);
+   persistPurchaseBundle({stockMovements:allMoves.filter(m=>String(m.id)!==String(purchase.id+'_SM')),batches,products,purchases});
    setPendingPurchases(getPendingPurchases().filter(x=>String(x.id)!==String(purchase.id)));
-   set('stockMovements',allMoves.filter(m=>String(m.id)!==String(purchase.id+'_SM')));
    repairLocalStockConsistency();
    loadAll();
    alert('Purchase deleted successfully. Stock was recalculated automatically.');
