@@ -446,17 +446,31 @@ function repairLocalStockConsistency(){
    }
  }
  for(const arr of purchaseBatchesByProduct.values())arr.sort((a,b)=>String(a.expiryDate||'').localeCompare(String(b.expiryDate||''))||String(a.batchNumber||'').localeCompare(String(b.batchNumber||'')));
- // Deduplicate bills by invoice number so a restored copy cannot count the same sale twice.
- const billGroups=new Map();
- for(const bill of bills){
-   const key=String(bill?.invoiceNumber||bill?.id||'');if(!key)continue;
-   if(!billGroups.has(key))billGroups.set(key,bill);
-   else {
-     const prev=billGroups.get(key);
-     if(bill?.returned)prev.returned=true;
-     if((bill?.items||[]).length>(prev?.items||[]).length)billGroups.set(key,{...billGroups.get(key),...bill});
-   }
- }
+ // V5.9.59 — invoice number is NOT a unique stock transaction.
+// Same invoice can contain multiple valid bill records.
+// Only the exact same bill record ID is ignored.
+const billGroups=new Map();
+
+for(const bill of bills){
+
+  const key=String(
+    bill?.id||
+    bill?.invoiceNumber||
+    ''
+  );
+
+  if(!key)continue;
+
+  if(!billGroups.has(key)){
+    billGroups.set(key,bill);
+  }else{
+    const prev=billGroups.get(key);
+
+    // Preserve returned status if either copy is returned.
+    if(bill?.returned)
+      prev.returned=true;
+  }
+}
  const saleQtyByBatch=new Map();
  const addSale=(b,q)=>{if(!b||q<=0)return;saleQtyByBatch.set(String(b.id),(saleQtyByBatch.get(String(b.id))||0)+q)};
  for(const bill of billGroups.values()){
