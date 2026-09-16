@@ -370,239 +370,299 @@ function reconcile(){
        BILL = STOCK OUT
        RETURNED BILL = NO STOCK OUT
     -------------------------------- */
+/* --------------------------------
+   BILL LEDGER
+   BILL = STOCK OUT
+   RETURNED BILL = NO STOCK OUT
 
-    const byInvoice=new Map();
+   IMPORTANT:
+   Same invoice number can contain
+   multiple valid sale rows.
+   Do NOT discard valid quantities.
+-------------------------------- */
 
+const byInvoice=new Map();
 
-    for(const bill of bills){
+for(const bill of bills){
 
-      const key=String(
-        bill?.invoiceNumber||
-        bill?.id||
+  const key=String(
+    bill?.invoiceNumber||
+    bill?.id||
+    ''
+  );
+
+  if(!key)continue;
+
+  if(!byInvoice.has(key)){
+    byInvoice.set(key,{
+      returned:!!bill?.returned,
+      items:[]
+    });
+  }
+
+  const group=byInvoice.get(key);
+
+  if(bill?.returned){
+    group.returned=true;
+  }
+
+  for(const it of (bill?.items||[])){
+
+    const q=Q(
+      it?.qty??
+      it?.quantity
+    );
+
+    if(!q)continue;
+
+    /*
+      Prevent only exact duplicate item records.
+      Different quantities under the same invoice
+      are kept as valid sales.
+    */
+
+    const sig=[
+      String(
+        it?.productId||
+        it?.productID||
         ''
-      );
+      ),
+      N(
+        it?.name||
+        it?.productName||
+        it?.medicine||
+        ''
+      ),
+      N(
+        it?.batchId||
+        ''
+      ),
+      N(
+        it?.batchNumber||
+        it?.batch||
+        ''
+      ),
+      String(q),
+      String(
+        Number(
+          it?.price||
+          it?.sellingPrice||
+          it?.rate||
+          0
+        )
+      )
+    ].join('|');
 
-      if(!key)
-        continue;
+    const already=group.items.some(x=>
+      x.__stockLedgerSignature===sig
+    );
 
+    if(already)continue;
 
-      const old=
-        byInvoice.get(key);
-
-
-      if(!old){
-
-        byInvoice.set(
-          key,
-          bill
-        );
-
-      }else{
-
-        /*
-          Duplicate invoice records:
-          keep the record containing
-          the larger item list.
-        */
-
-        if(
-          (bill?.items||[]).length >
-          (old?.items||[]).length
-        ){
-
-          byInvoice.set(
-            key,
-            bill
-          );
-
-        }else if(
-          bill?.returned
-        ){
-
-          old.returned=true;
-        }
-      }
-    }
-
-
-    const sold=new Map();
-
-
-    const addSold=(b,q)=>{
-
-      if(!b||q<=0)
-        return;
-
-      const id=
-        String(b.id);
-
-      sold.set(
-        id,
-        (sold.get(id)||0)+q
-      );
+    const copy={
+      ...it,
+      __stockLedgerSignature:sig
     };
+
+    group.items.push(copy);
+  }
+}
+
+
+const sold=new Map();
+
+const addSold=(b,q)=>{
+
+  if(!b||q<=0)return;
+
+  const id=String(b.id);
+
+  sold.set(
+    id,
+    (sold.get(id)||0)+q
+  );
+};
+
+
+/* --------------------------------
+   PROCESS ALL VALID BILL ITEMS
+-------------------------------- */
+
+for(const bill of byInvoice.values()){
+
+  /*
+    Returned bill = sale cancelled.
+  */
+  if(bill.returned)continue;
+
+  for(const it of bill.items){
+
+    const q=Q(
+      it?.qty??
+      it?.quantity
+    );
+
+    if(!q)continue;
+
+    const p=product(
+      it?.productId||
+      it?.productID,
+
+      it?.name||
+      it?.productName||
+      it?.medicine
+    );
+
+    if(!p)continue;
+
+    const b=batch(
+      p,
+
+      it?.batchNumber||
+      it?.batch||
+      '',
+
+      it?.batchId||
+      ''
+    );
 
 
     /*
-      Process every non-returned bill.
+      Exact batch match.
     */
 
-    for(
-      const bill
-      of byInvoice.values()
+    if(
+      b &&
+      inQty.has(String(b.id))
     ){
 
-      if(bill?.returned)
-        continue;
-
-
-      for(
-        const it
-        of (bill?.items||[])
-      ){
-
-        const q=Q(
-          it?.qty??
-          it?.quantity
-        );
-
-        if(!q)
-          continue;
-
-
-        const p=product(
-          it?.productId||
-          it?.productID,
-
-          it?.name||
-          it?.productName||
-          it?.medicine
-        );
-
-
-        if(!p)
-          continue;
-
-
-        const b=batch(
-          p,
-
-          it?.batchNumber||
-          it?.batch||
-          '',
-
-          it?.batchId||
-          ''
-        );
-
-
-        /*
-          Exact batch match.
-        */
-
-        if(
-          b &&
-          inQty.has(
-            String(b.id)
-          )
-        ){
-
-          addSold(
-            b,
-            q
-          );
-
-          continue;
-        }
-
-
-        /*
-          Legacy bill:
-          missing/wrong batch ID.
-
-          Allocate only from the same
-          medicine's purchased batches.
-
-          FEFO = earliest expiry first.
-        */
-
-        const candidates=
-          (
-            purchaseBatches.get(
-              String(p.id)
-            )||[]
-          )
-          .slice()
-          .sort(
-            (x,y)=>
-              String(
-                x?.expiryDate||
-                '9999-12-31'
-              ).localeCompare(
-                String(
-                  y?.expiryDate||
-                  '9999-12-31'
-                )
-              ) ||
-
-              N(
-                x?.batchNumber||
-                x?.batch
-              ).localeCompare(
-                N(
-                  y?.batchNumber||
-                  y?.batch
-                )
-              )
-          );
-
-
-        let left=q;
-
-
-        for(
-          const c
-          of candidates
-        ){
-
-          if(left<=0)
-            break;
-
-
-          const id=
-            String(c.id);
-
-
-          const available=
-            Math.max(
-              0,
-
-              (inQty.get(id)||0) -
-              (sold.get(id)||0)
-            );
-
-
-          const take=
-            Math.min(
-              available,
-              left
-            );
-
-
-          if(take>0){
-
-            addSold(
-              c,
-              take
-            );
-
-            left-=take;
-          }
-        }
-      }
+      addSold(b,q);
+      continue;
     }
 
 
+    /*
+      Legacy bill:
+      missing/wrong batch information.
+
+      Allocate only from the same medicine.
+      FEFO = earliest expiry first.
+    */
+
+    const candidates=
+      (
+        purchaseBatches.get(
+          String(p.id)
+        )||[]
+      )
+      .slice()
+      .sort(
+        (x,y)=>
+          String(
+            x?.expiryDate||
+            '9999-12-31'
+          ).localeCompare(
+            String(
+              y?.expiryDate||
+              '9999-12-31'
+            )
+          ) ||
+
+          N(
+            x?.batchNumber||
+            x?.batch
+          ).localeCompare(
+            N(
+              y?.batchNumber||
+              y?.batch
+            )
+          )
+      );
+
+
+    let left=q;
+
+    for(const c of candidates){
+
+      if(left<=0)break;
+
+      const id=String(c.id);
+
+      const available=Math.max(
+        0,
+        (inQty.get(id)||0)-
+        (sold.get(id)||0)
+      );
+
+      const take=Math.min(
+        available,
+        left
+      );
+
+      if(take>0){
+
+        addSold(
+          c,
+          take
+        );
+
+        left-=take;
+      }
+    }
+  }
+}
+
+
+/* --------------------------------
+   STOCK ADJUSTMENTS
+-------------------------------- */
+
+const adj=new Map();
+
+for(const m of moves){
+
+  const type=String(
+    m?.type||
+    ''
+  ).toUpperCase();
+
+  if(
+    type!=='STOCK_ADJUSTMENT' &&
+    type!=='ADJUSTMENT'
+  ){
+    continue;
+  }
+
+  const p=product(
+    m?.productId||
+    m?.productID,
+
+    m?.productName||
+    m?.medicine||
+    m?.name
+  );
+
+  const b=batch(
+    p,
+
+    m?.batchNumber||
+    m?.batch||
+    '',
+
+    m?.batchId||
+    ''
+  );
+
+  if(!b)continue;
+
+  const id=String(b.id);
+
+  adj.set(
+    id,
+    (adj.get(id)||0)+
+    Number(m?.qty||0)
+  );
+}
     /* --------------------------------
        STOCK ADJUSTMENTS
     -------------------------------- */
