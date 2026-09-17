@@ -1,4 +1,4 @@
-// V5.9.56 PURCHASE HISTORY + OPENING STOCK INTEGRITY FIX\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
+// V5.9.3 permanent login load fix: repaired JavaScript syntax error that prevented the entire admin.js module from loading.
 
 // V5.9.4 OFFLINE-FIRST: never clear existing local data.
 // A one-time Firebase migration copies existing cloud data into local storage.
@@ -316,51 +316,7 @@ function stockLedgerDeltaForBatch(batchId){
  }
  return delta;
 }
-
-
-// V5.9.56 PURCHASE-HISTORY SAFE RECOVERY
-// Recover only a purchase ledger row that has an unambiguous original PURCHASE
-// stock movement. Never invent a purchase from product/batch stock alone.
-function recoverPurchaseHistoryFromMovementsSafe(){
-  if(configured||!Array.isArray(purchases)||!Array.isArray(batches)||!Array.isArray(products))return false;
-  const moves=Array.isArray(get('stockMovements',[]))?get('stockMovements',[]):[];
-  if(!moves.length)return false;
-  const ids=new Set(purchases.map(x=>String(x?.id||'')));
-  let changed=false;
-  for(const m of moves){
-    if(String(m?.type||'').toUpperCase()!=='PURCHASE')continue;
-    const mid=String(m?.id||'');
-    if(!mid.endsWith('_SM'))continue;
-    const purchaseId=mid.slice(0,-3); if(!purchaseId||ids.has(purchaseId))continue;
-    const pid=String(m?.productId||'');
-    const product=products.find(x=>String(x?.id||'')===pid); if(!product)continue;
-    const batch=batches.find(x=>String(x?.id||'')===String(m?.batchId||'') || (String(x?.productId||'')===pid && String(x?.batchNumber||x?.batch||'')===String(m?.batchNumber||'')));
-    if(!batch)continue;
-    const qty=Math.max(0,Number(m?.qty||0)); if(!qty)continue;
-    const gstRate=Number(batch?.purchaseGstRate||0);
-    const withGst=Number(m?.purchasePriceWithGst||batch?.purchasePriceWithGst||0);
-    const base=Number(batch?.purchasePrice||0)||(gstRate>0?withGst/(1+gstRate/100):withGst);
-    purchases.unshift({
-      id:purchaseId,productId:pid,productName:batch?.productName||product.name||'',
-      category:batch?.category||batch?.cat||product.category||product.cat||'Human Medicines',
-      cat:batch?.category||batch?.cat||product.category||product.cat||'Human Medicines',
-      schedule:batch?.schedule||product.schedule||'',qty,batchNumber:batch?.batchNumber||batch?.batch||m?.batchNumber||'',
-      expiryDate:batch?.expiryDate||'',manufacturer:batch?.manufacturer||batch?.manufacturerDetails||product.manufacturer||'',
-      manufacturerDetails:batch?.manufacturerDetails||batch?.manufacturer||product.manufacturerDetails||'',
-      supplier:batch?.supplier||batch?.supplierName||'',invoice:m?.reference||'',
-      purchaseDate:m?.createdAt?String(m.createdAt).slice(0,10):'',purchasePrice:base,
-      purchaseGstRate:gstRate,purchasePriceWithGst:withGst||base+(base*gstRate/100),
-      mrp:Number(batch?.mrp||product.mrp||0),sellingPrice:Number(batch?.sellingPrice||product.price||0),
-      minQty:Number(product?.lowStockLevel||10),recovered:true,recoveredAt:new Date().toISOString()
-    });
-    ids.add(purchaseId);changed=true;
-  }
-  if(changed)set('purchases',purchases);
-  return changed;
-}
-
 function repairLocalStockConsistency(){
- recoverPurchaseHistoryFromMovementsSafe();
  // Single-source inventory reconciliation for offline mode.
  // Purchase records define inbound quantity; non-returned bills define sales;
  // online-order reservations are NOT part of this offline ledger. Explicit
@@ -413,8 +369,9 @@ function repairLocalStockConsistency(){
    const bn=pu?.batchNumber||pu?.batch||'';
    let b=resolveBatch(prod,bn,pu?.batchId||'');
    if(!b&&bn){
-     // Do not create synthetic batches during reconciliation.
-     b=null;
+     const id=String(prod.id)+'__'+String(bn);
+     b={id,productId:String(prod.id),productName:prod.name,batchNumber:String(bn),expiryDate:pu?.expiryDate||'',stock:0,mrp:Number(pu?.mrp||prod.mrp||prod.price||0),sellingPrice:Number(pu?.sellingPrice||prod.price||0),purchasePrice:Number(pu?.purchasePrice||0),purchaseGstRate:Number(pu?.purchaseGstRate||0),purchasePriceWithGst:Number(pu?.purchasePriceWithGst||0)};
+     batches.push(b);batchById.set(id,b);indexBatch(b);changed=true;
    }
    if(!b)continue;
    const bid=String(b.id);purchaseQtyByBatch.set(bid,(purchaseQtyByBatch.get(bid)||0)+q);
@@ -427,12 +384,16 @@ function repairLocalStockConsistency(){
    }
  }
  for(const arr of purchaseBatchesByProduct.values())arr.sort((a,b)=>String(a.expiryDate||'').localeCompare(String(b.expiryDate||''))||String(a.batchNumber||'').localeCompare(String(b.batchNumber||'')));
- // V5.9.61 — invoice number is not a unique stock transaction.
- // Count each genuine bill record by its unique bill id, including same-invoice bills.
+ // Deduplicate bills by invoice number so a restored copy cannot count the same sale twice.
  const billGroups=new Map();
  for(const bill of bills){
-   const key=String(bill?.id||'');if(!key)continue;
+   const key=String(bill?.invoiceNumber||bill?.id||'');if(!key)continue;
    if(!billGroups.has(key))billGroups.set(key,bill);
+   else {
+     const prev=billGroups.get(key);
+     if(bill?.returned)prev.returned=true;
+     if((bill?.items||[]).length>(prev?.items||[]).length)billGroups.set(key,{...billGroups.get(key),...bill});
+   }
  }
  const saleQtyByBatch=new Map();
  const addSale=(b,q)=>{if(!b||q<=0)return;saleQtyByBatch.set(String(b.id),(saleQtyByBatch.get(String(b.id))||0)+q)};
@@ -468,44 +429,14 @@ function repairLocalStockConsistency(){
  for(const b of batches){
    const bid=String(b?.id||'');if(!bid)continue;
    const purchaseBase=purchaseQtyByBatch.get(bid);
-   const sales=Number(saleQtyByBatch.get(bid)||0);
-   const adjustments=Number(adjustmentByBatch.get(bid)||0);
-   const current=Math.max(0,Number(b?.stock||0));
    let expected;
    if(purchaseBase!==undefined){
-     // IMPORTANT: current stock may contain opening stock that was already present
-     // before the first Purchase Entry. The old reconciliation treated Purchase Qty
-     // as the complete inbound stock and silently removed that opening balance.
-     // Capture that pre-existing balance once, without changing today's stock.
-     let opening=Number(b?.openingStock);
-     if(!Number.isFinite(opening)||opening<0){
-       opening=Math.max(0,current-Number(purchaseBase||0)+sales-adjustments);
-       b.openingStock=opening;
-       b.openingStockInitializedAt=b.openingStockInitializedAt||new Date().toISOString();
-       changed=true;
-     }
-     expected=Math.max(0,opening+Number(purchaseBase||0)-sales+adjustments);
+     expected=Math.max(0,purchaseBase-(saleQtyByBatch.get(bid)||0)+(adjustmentByBatch.get(bid)||0));
    }else{
-     // No purchase ledger: this is opening/unlinked stock. Preserve it exactly.
-     expected=current;
-     if(!Number.isFinite(Number(b?.openingStock))||Number(b.openingStock)<0){
-       b.openingStock=current;
-       b.openingStockInitializedAt=b.openingStockInitializedAt||new Date().toISOString();
-       changed=true;
-     }
+     // Opening-stock batches have no purchase ledger; preserve their current physical stock.
+     expected=Math.max(0,Number(b?.stock||0));
    }
-   // Never destroy a real physical stock value just because the ledger is incomplete.
-   // If the computed ledger balance is inconsistent, preserve current stock and mark
-   // the batch for review instead of silently changing it.
-   if(Math.abs(current-expected)>0.000001){
-     b.stockIntegrityStatus='MISMATCH';
-     b.stockIntegrityExpected=expected;
-     b.stockIntegrityDifference=current-expected;
-     changed=true;
-   }else if(b.stockIntegrityStatus||b.stockIntegrityExpected!==undefined||b.stockIntegrityDifference!==undefined){
-     delete b.stockIntegrityStatus; delete b.stockIntegrityExpected; delete b.stockIntegrityDifference;
-     changed=true;
-   }
+   if(Math.abs(Number(b?.stock||0)-expected)>0.000001){b.stock=expected;changed=true}
    const pid=String(b?.productId||'');if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected);
  }
  for(const p of products){
@@ -619,7 +550,7 @@ window.checkMedicineAvailability=()=>{
 };
 
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
-function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc){const keys=new Set(batches.map(b=>String(b?.productId||'')+'|'+String(b?.batchNumber||b?.batch||'').trim().toUpperCase()).filter(x=>!x.startsWith('|')));bc.textContent=keys.size;}const normMedicineName=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' ');const productNameById=new Map(products.map(p=>[String(p.id),normMedicineName(p.name)]));const effectiveStockByName=new Map();for(const name of new Set(products.map(p=>normMedicineName(p.name)).filter(Boolean))){const rep=products.find(p=>normMedicineName(p.name)===name);effectiveStockByName.set(name,Math.max(0,effectiveMedicineStock(rep))) }const alertNames=new Set();const zeroAlerts=zero.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n)||(effectiveStockByName.get(n)||0)>0)return false;alertNames.add(n);return true});const lowAlerts=low.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n))return false;const effective=effectiveStockByName.get(n)||0;if(effective<=0)return false;alertNames.add(n);return true});const catKey=p=>{const raw=String(p?.cat||p?.category||'Human Medicines').trim();const l=raw.toLowerCase();if(l.includes('veterinary'))return 'Veterinary';if(l.includes('human'))return 'Human Medicines';if(l.includes('baby'))return 'Baby Care';if(l.includes('pet'))return 'Pet Products';if(l.includes('health'))return 'Health';if(l.includes('device'))return 'Devices';if(l.includes('cosmetic'))return 'Cosmetics';return raw||'Other';};const catLabel={"Human Medicines":"💊 HUMAN MEDICINES","Veterinary":"🐾 VETERINARY MEDICINES","Baby Care":"👶 BABY PRODUCTS","Pet Products":"🐶 PET PRODUCTS","Health":"🩺 HEALTH CARE","Devices":"🩹 MEDICAL DEVICES","Cosmetics":"💄 COSMETICS",Other:"📦 OTHER"};const groups={};[...zeroAlerts.map(p=>({...p,__kind:'OUT OF STOCK'})),...lowAlerts.map(p=>({...p,__kind:'LOW STOCK'}))].forEach(p=>{const c=catKey(p);(groups[c]||(groups[c]=[])).push(p)});const alerts=[];Object.keys(groups).sort((a,b)=>{const order=['Human Medicines','Veterinary','Baby Care','Pet Products','Health','Devices','Cosmetics','Other'];return (order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b))}).forEach(c=>{alerts.push('<div style="font-weight:800;font-size:16px;margin:12px 0 6px">'+esc(catLabel[c]||c)+'</div>');groups[c].forEach(p=>{const effective=effectiveStockByName.get(normMedicineName(p.name))||0;alerts.push('<div class="warning">'+esc(p.__kind+': '+p.name+' ('+effective+')')+'</div>')})});exp.forEach(b=>alerts.push('<div class="warning">'+esc(expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)+'</div>'));$('alerts').innerHTML=alerts.join('')||'<div class="good">No urgent stock or expiry alerts.</div>';
+function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc)bc.textContent=batches.length;const normMedicineName=v=>String(v||'').trim().toLowerCase().replace(/\s+/g,' ');const productNameById=new Map(products.map(p=>[String(p.id),normMedicineName(p.name)]));const effectiveStockByName=new Map();for(const name of new Set(products.map(p=>normMedicineName(p.name)).filter(Boolean))){const rep=products.find(p=>normMedicineName(p.name)===name);effectiveStockByName.set(name,Math.max(0,effectiveMedicineStock(rep))) }const alertNames=new Set();const zeroAlerts=zero.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n)||(effectiveStockByName.get(n)||0)>0)return false;alertNames.add(n);return true});const lowAlerts=low.filter(p=>{const n=normMedicineName(p.name);if(!n||alertNames.has(n))return false;const effective=effectiveStockByName.get(n)||0;if(effective<=0)return false;alertNames.add(n);return true});const catKey=p=>{const raw=String(p?.cat||p?.category||'Human Medicines').trim();const l=raw.toLowerCase();if(l.includes('veterinary'))return 'Veterinary';if(l.includes('human'))return 'Human Medicines';if(l.includes('baby'))return 'Baby Care';if(l.includes('pet'))return 'Pet Products';if(l.includes('health'))return 'Health';if(l.includes('device'))return 'Devices';if(l.includes('cosmetic'))return 'Cosmetics';return raw||'Other';};const catLabel={"Human Medicines":"💊 HUMAN MEDICINES","Veterinary":"🐾 VETERINARY MEDICINES","Baby Care":"👶 BABY PRODUCTS","Pet Products":"🐶 PET PRODUCTS","Health":"🩺 HEALTH CARE","Devices":"🩹 MEDICAL DEVICES","Cosmetics":"💄 COSMETICS",Other:"📦 OTHER"};const groups={};[...zeroAlerts.map(p=>({...p,__kind:'OUT OF STOCK'})),...lowAlerts.map(p=>({...p,__kind:'LOW STOCK'}))].forEach(p=>{const c=catKey(p);(groups[c]||(groups[c]=[])).push(p)});const alerts=[];Object.keys(groups).sort((a,b)=>{const order=['Human Medicines','Veterinary','Baby Care','Pet Products','Health','Devices','Cosmetics','Other'];return (order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b))}).forEach(c=>{alerts.push('<div style="font-weight:800;font-size:16px;margin:12px 0 6px">'+esc(catLabel[c]||c)+'</div>');groups[c].forEach(p=>{const effective=effectiveStockByName.get(normMedicineName(p.name))||0;alerts.push('<div class="warning">'+esc(p.__kind+': '+p.name+' ('+effective+')')+'</div>')})});exp.forEach(b=>alerts.push('<div class="warning">'+esc(expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)+'</div>'));$('alerts').innerHTML=alerts.join('')||'<div class="good">No urgent stock or expiry alerts.</div>';
 $('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
  const selected=$('bMedicine').value,selectedPu=$('puProduct').value;
@@ -988,7 +919,6 @@ window.editPurchase=async id=>{
   show('purchase'); window.scrollTo({top:0,behavior:'smooth'});
 };
 let purchaseActionLock=false,lastPurchaseActionKey='',lastPurchaseActionAt=0;
-// V5.9.55 PURCHASE DATA INTEGRITY: Purchase History owns supplier/cost/GST; product/batch masters must not overwrite prior purchase records.
 window.savePurchase=async()=>{
   const actionKey=[
     $('puProductSearch')?.value?.trim()||'', $('puProduct')?.value||'', $('puBatch')?.value?.trim()||'',
@@ -1029,19 +959,13 @@ window.savePurchase=async()=>{
         const oldQty=Number(purchase.qty||0),delta=qty-oldQty;
         if(delta<0&&Number(oldBatch.stock||0)<Math.abs(delta))return alert('Cannot reduce this purchase quantity because the batch does not have enough remaining stock. Some quantity has already been sold/used.');
         oldBatch.stock=Math.max(0,Number(oldBatch.stock||0)+delta);
-        // Keep purchase-specific supplier/cost/GST immutable in Purchase History.
-        // A later purchase of the same product+batch must not overwrite the earlier
-        // purchase's commercial data. Batch keeps only operational/display values.
-        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
+        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total});
       }
       const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
       const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id)); if(pi>=0)purchases[pi]=updated;
       const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:newBid,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
       originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer});
-      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0;
-      // IMPORTANT: purchase cost/GST belong to the individual purchase record.
-      // Never overwrite product-master purchase values while editing a purchase.
-      // This prevents one purchase from changing another purchase's supplier/rate/GST context.
+      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0; originalProduct.purchasePrice=gst.base; originalProduct.purchaseGstRate=gst.rate; originalProduct.purchasePriceWithGst=gst.total; originalProduct.gst=gst.rate;
       originalProduct.stock=batches.filter(x=>String(x.productId)===String(originalProduct.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
       set('stockMovements',newStockMovements);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases(getPendingPurchases().map(x=>String(x.id)===String(updated.id)?updated:x));
       editingPurchaseId=''; const cancel=$('purchaseEditCancel');if(cancel)cancel.remove();const btn=document.querySelector('#purchaseSaveBtn');if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
@@ -1051,14 +975,8 @@ window.savePurchase=async()=>{
     const productId=product?.id||('product_'+uid());
     const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
     if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)} else {product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails})}
-    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){
-      b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
-      // Do NOT overwrite existing batch supplier/purchase cost/GST. Those values
-      // are purchase-entry specific and remain in Purchase History.
-    } else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
-    product.stock=batches.filter(x=>String(x.productId)===String(product.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);if(purchase.sellingPrice)product.price=purchase.sellingPrice;product.manufacturer=purchase.manufacturer||product.manufacturer||'';product.manufacturerDetails=purchase.manufacturerDetails||product.manufacturerDetails||'';
-    // Purchase-specific cost/GST are deliberately NOT copied into the product master.
-    // Every Purchase History row keeps its own supplier, rate and GST from the bill.
+    let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;b.purchasePrice=purchase.purchasePrice;b.purchaseGstRate=purchase.purchaseGstRate;b.purchasePriceWithGst=purchase.purchasePriceWithGst} else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    product.stock=batches.filter(x=>String(x.productId)===String(product.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);if(purchase.sellingPrice)product.price=purchase.sellingPrice;Object.assign(product,{manufacturer:purchase.manufacturer||product.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||product.manufacturerDetails||'',purchasePrice:purchase.purchasePrice,purchaseGstRate:purchase.purchaseGstRate,purchasePriceWithGst:purchase.purchasePriceWithGst,mrp:purchase.mrp,gst:purchase.purchaseGstRate});
     purchases.unshift(purchase); const sm=get('stockMovements',[]);sm.push({id:purchase.id+'_SM',type:'PURCHASE',productId,batchId:productId+'__'+batchNumber,batchNumber,qty,reference:invoice||'PURCHASE',purchasePriceWithGst:purchase.purchasePriceWithGst,createdAt:new Date().toISOString()});
     set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
     alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.\nSaved safely on this phone.');
