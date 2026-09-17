@@ -346,134 +346,51 @@ function stockLedgerDeltaForBatch(batchId){
  return delta;
 }
 function repairLocalStockConsistency(){
- // Single-source inventory reconciliation for offline mode.
- // Purchase records define inbound quantity; non-returned bills define sales;
- // online-order reservations are NOT part of this offline ledger. Explicit
- // adjustments are applied once. Duplicate movement records are never allowed
- // to double-count.
- let changed=false;
- const sm=Array.isArray(get('stockMovements',[]))?get('stockMovements',[]):[];
- const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
- const productById=new Map(products.map(p=>[String(p?.id||''),p]).filter(x=>x[0]));
- const productsByName=new Map();
- for(const p of products){const n=norm(p?.name);if(!n)continue;if(!productsByName.has(n))productsByName.set(n,[]);productsByName.get(n).push(p)}
- const resolveProduct=(id,name)=>{
-   const byId=productById.get(String(id||''));
-   if(byId)return byId;
-   const arr=productsByName.get(norm(name))||[];
-   return arr.length===1?arr[0]:null;
- };
- const batchById=new Map(batches.map(b=>[String(b?.id||''),b]).filter(x=>x[0]));
- const batchByPidName=new Map(),batchByName=new Map();
- const indexBatch=b=>{
-   const bn=norm(b?.batchNumber||b?.batch);if(!bn)return;
-   const pid=String(b?.productId||'');const pn=norm(b?.productName||b?.medicineName||b?.medicine||b?.name);
-   if(pid){const k=pid+'__'+bn;if(!batchByPidName.has(k))batchByPidName.set(k,[]);batchByPidName.get(k).push(b)}
-   if(pn){const k=pn+'__'+bn;if(!batchByName.has(k))batchByName.set(k,[]);batchByName.get(k).push(b)}
- };
- batches.forEach(indexBatch);
- const batchFits=(b,prod,bn)=>{
-   if(!b||!prod)return false;
-   const wantBn=norm(bn);
-   if(wantBn&&norm(b.batchNumber||b.batch)!==wantBn)return false;
-   return String(b.productId||'')===String(prod.id||'') || norm(b.productName||b.medicineName||b.medicine||b.name)===norm(prod.name);
- };
- const resolveBatch=(prod,bn,bid)=>{
-   const wantedBn=norm(bn);
-   const byId=batchById.get(String(bid||''));
-   if(byId&&batchFits(byId,prod,wantedBn))return byId;
-   if(wantedBn){
-     const exact=batchByPidName.get(String(prod.id)+'__'+wantedBn)||[];
-     if(exact.length===1)return exact[0];
-     const byName=batchByName.get(norm(prod.name)+'__'+wantedBn)||[];
-     if(byName.length===1)return byName[0];
-   }
-   return null;
- };
- const purchaseQtyByBatch=new Map();
- const purchaseBatchesByProduct=new Map();
- for(const pu of purchases){
-   const q=Math.max(0,Number(pu?.qty??pu?.quantity??0));if(!q)continue;
-   const prod=resolveProduct(pu?.productId||pu?.productID,pu?.productName||pu?.medicine||pu?.name);if(!prod)continue;
-   const bn=pu?.batchNumber||pu?.batch||'';
-   let b=resolveBatch(prod,bn,pu?.batchId||'');
-   if(!b&&bn){
-     const id=String(prod.id)+'__'+String(bn);
-     b={id,productId:String(prod.id),productName:prod.name,batchNumber:String(bn),expiryDate:pu?.expiryDate||'',stock:0,mrp:Number(pu?.mrp||prod.mrp||prod.price||0),sellingPrice:Number(pu?.sellingPrice||prod.price||0),purchasePrice:Number(pu?.purchasePrice||0),purchaseGstRate:Number(pu?.purchaseGstRate||0),purchasePriceWithGst:Number(pu?.purchasePriceWithGst||0)};
-     batches.push(b);batchById.set(id,b);indexBatch(b);changed=true;
-   }
-   if(!b)continue;
-   const bid=String(b.id);purchaseQtyByBatch.set(bid,(purchaseQtyByBatch.get(bid)||0)+q);
-   const pid=String(prod.id);if(!purchaseBatchesByProduct.has(pid))purchaseBatchesByProduct.set(pid,[]);if(!purchaseBatchesByProduct.get(pid).includes(b))purchaseBatchesByProduct.get(pid).push(b);
-   // Repair an unambiguous legacy batch link when its name and batch identify the same medicine.
-   if(String(b.productId||'')!==pid && norm(b.productName)===norm(prod.name)){
-     const oldPid=String(b.productId||'');
-     const conflicting=purchases.some(other=>String(other?.id||'')!==String(pu?.id||'')&&String(other?.productId||'')===oldPid&&norm(other?.batchNumber||other?.batch)===norm(bn));
-     if(!conflicting){b.productId=pid;b.productName=prod.name;changed=true}
-   }
- }
- for(const arr of purchaseBatchesByProduct.values())arr.sort((a,b)=>String(a.expiryDate||'').localeCompare(String(b.expiryDate||''))||String(a.batchNumber||'').localeCompare(String(b.batchNumber||'')));
- // Deduplicate bills by invoice number so a restored copy cannot count the same sale twice.
- const billGroups=new Map();
- for(const bill of bills){
-   const key=String(bill?.invoiceNumber||bill?.id||'');if(!key)continue;
-   if(!billGroups.has(key))billGroups.set(key,bill);
-   else {
-     const prev=billGroups.get(key);
-     if(bill?.returned)prev.returned=true;
-     if((bill?.items||[]).length>(prev?.items||[]).length)billGroups.set(key,{...billGroups.get(key),...bill});
-   }
- }
- const saleQtyByBatch=new Map();
- const addSale=(b,q)=>{if(!b||q<=0)return;saleQtyByBatch.set(String(b.id),(saleQtyByBatch.get(String(b.id))||0)+q)};
- for(const bill of billGroups.values()){
-   if(bill?.returned)continue;
-   for(const it of (bill?.items||[])){
-     const q=Math.max(0,Number(it?.qty??it?.quantity??0));if(!q)continue;
-     const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);
-     const b=prod?resolveBatch(prod,it?.batchNumber||it?.batch,it?.batchId||''):null;
-     if(b){addSale(b,q);continue}
-     // Legacy bills may not contain a usable batch id. Allocate the sale against
-     // purchase-backed batches for the same medicine without double-counting.
-     const arr=prod?(purchaseBatchesByProduct.get(String(prod.id))||[]):[];let remaining=q;
-     for(const candidate of arr){
-       if(remaining<=0)break;
-       const already=saleQtyByBatch.get(String(candidate.id))||0;
-       const available=Math.max(0,(purchaseQtyByBatch.get(String(candidate.id))||0)-already);
-       const take=Math.min(available,remaining);
-       if(take>0){addSale(candidate,take);remaining-=take}
-     }
-   }
- }
- // Online-order reservations are intentionally excluded from offline stock reconciliation.
- // Current stock is driven only by purchase, genuine billed sales, returns and adjustments.
- const orderReserveByBatch=new Map();
- const adjustmentByBatch=new Map();
- for(const m of sm){
-   const type=String(m?.type||'').toUpperCase();if(type!=='STOCK_ADJUSTMENT'&&type!=='ADJUSTMENT')continue;
-   const prod=resolveProduct(m?.productId,m?.productName||m?.medicine);const b=prod?resolveBatch(prod,m?.batchNumber||m?.batch,m?.batchId||''):null;if(!b)continue;
-   const bid=String(b.id);adjustmentByBatch.set(bid,(adjustmentByBatch.get(bid)||0)+Number(m?.qty||0));
- }
- const totalByProduct=new Map();
- for(const b of batches){
-   const bid=String(b?.id||'');if(!bid)continue;
-   const purchaseBase=purchaseQtyByBatch.get(bid);
-   let expected;
-   if(purchaseBase!==undefined){
-     expected=Math.max(0,purchaseBase-(saleQtyByBatch.get(bid)||0)+(adjustmentByBatch.get(bid)||0));
-   }else{
-     // Opening-stock batches have no purchase ledger; preserve their current physical stock.
-     expected=Math.max(0,Number(b?.stock||0));
-   }
-   if(Math.abs(Number(b?.stock||0)-expected)>0.000001){b.stock=expected;changed=true}
-   const pid=String(b?.productId||'');if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected);
- }
- for(const p of products){
-   const pid=String(p?.id||''),total=totalByProduct.get(pid);
-   if(total!==undefined&&Math.abs(Number(p?.stock||0)-total)>0.000001){p.stock=total;changed=true}
- }
- if(changed){set('batches',batches);set('products',products)}
- localStorage.setItem('skm_stock_reconciled_v7','yes');
+  // V5.9.56 STOCK LEDGER INTEGRITY: rebuild purchase-backed batch stock from
+  // Purchase History minus genuine billed sales plus returned quantities.
+  // This prevents stale batch/product stock from showing 4 after 4 purchased
+  // and 3 sold; the correct current stock is 1. Online-order reservations are
+  // intentionally ignored in local-safe mode.
+  let changed=false;
+  const norm=v=>String(v??'').trim().toLowerCase().replace(/\s+/g,' ');
+  const num=v=>Math.max(0,Number(v||0));
+  const productById=new Map(products.map(p=>[String(p?.id||''),p]).filter(x=>x[0]));
+  const productsByName=new Map();
+  for(const p of products){const n=norm(p?.name);if(!n)continue;if(!productsByName.has(n))productsByName.set(n,[]);productsByName.get(n).push(p)}
+  const resolveProduct=(id,name)=>{const byId=productById.get(String(id||''));if(byId)return byId;const arr=productsByName.get(norm(name))||[];return arr.length===1?arr[0]:null};
+  const batchById=new Map(batches.map(b=>[String(b?.id||''),b]).filter(x=>x[0]));
+  const batchKey=(pid,bn)=>String(pid||'')+'__'+norm(bn);
+  const batchByProductBatch=new Map();
+  for(const b of batches){const pid=String(b?.productId||''),bn=norm(b?.batchNumber||b?.batch);if(pid&&bn)batchByProductBatch.set(batchKey(pid,bn),b)}
+  const resolveBatch=(prod,item)=>{
+    if(!prod)return null; const bid=String(item?.batchId||''),wantedBn=norm(item?.batchNumber||item?.batch);
+    const byId=batchById.get(bid);
+    if(byId){const sameProduct=String(byId.productId||'')===String(prod.id||'')||norm(byId.productName||byId.medicineName||byId.medicine||byId.name)===norm(prod.name);if(sameProduct&&(!wantedBn||norm(byId.batchNumber||byId.batch)===wantedBn))return byId}
+    if(wantedBn){const exact=batchByProductBatch.get(batchKey(prod.id,wantedBn));if(exact)return exact;const byName=batches.filter(b=>norm(b?.batchNumber||b?.batch)===wantedBn&&norm(b?.productName||b?.medicineName||b?.medicine||b?.name)===norm(prod.name));if(byName.length===1)return byName[0]}
+    return null;
+  };
+  const purchaseQtyByBatch=new Map(),purchaseBatchesByProduct=new Map();
+  for(const pu of (purchases||[])){
+    const q=num(pu?.qty??pu?.quantity);if(!q)continue;
+    const prod=resolveProduct(pu?.productId||pu?.productID,pu?.productName||pu?.medicine||pu?.name);if(!prod)continue;
+    const bn=String(pu?.batchNumber||pu?.batch||'').trim();if(!bn)continue;
+    let b=resolveBatch(prod,{batchId:pu?.batchId,batchNumber:bn});
+    if(!b){const id=String(prod.id)+'__'+bn;b={id,productId:String(prod.id),productName:prod.name,batchNumber:bn,expiryDate:pu?.expiryDate||'',stock:0,mrp:num(pu?.mrp||prod.mrp||prod.price),sellingPrice:num(pu?.sellingPrice||prod.price),purchasePrice:num(pu?.purchasePrice),purchaseGstRate:num(pu?.purchaseGstRate),purchasePriceWithGst:num(pu?.purchasePriceWithGst)};batches.push(b);batchById.set(id,b);batchByProductBatch.set(batchKey(prod.id,bn),b);changed=true}
+    const bid=String(b.id);purchaseQtyByBatch.set(bid,(purchaseQtyByBatch.get(bid)||0)+q);const pid=String(prod.id);if(!purchaseBatchesByProduct.has(pid))purchaseBatchesByProduct.set(pid,[]);if(!purchaseBatchesByProduct.get(pid).includes(b))purchaseBatchesByProduct.get(pid).push(b);
+  }
+  const billGroups=new Map();
+  for(const bill of (bills||[])){const key=String(bill?.invoiceNumber||bill?.id||'');if(!key)continue;if(!billGroups.has(key))billGroups.set(key,bill);else{const prev=billGroups.get(key),merged={...prev};if(bill?.returned)merged.returned=true;if((bill?.items||[]).length>(prev?.items||[]).length)Object.assign(merged,bill);billGroups.set(key,merged)}}
+  const saleQtyByBatch=new Map(),returnedQtyByBatch=new Map();
+  const addQty=(map,b,q)=>{if(!b||q<=0)return;const id=String(b.id);map.set(id,(map.get(id)||0)+q)};
+  for(const bill of billGroups.values()){for(const it of (bill?.items||[])){const q=num(it?.qty??it?.quantity);if(!q)continue;const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);const b=resolveBatch(prod,it);if(!b)continue;if(bill?.returned)addQty(returnedQtyByBatch,b,q);else addQty(saleQtyByBatch,b,q)}}
+  for(const bill of billGroups.values()){if(bill?.returned)continue;for(const it of (bill?.items||[])){const q=num(it?.qty??it?.quantity);if(!q)continue;const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);if(!prod||resolveBatch(prod,it))continue;const arr=(purchaseBatchesByProduct.get(String(prod.id))||[]).slice().sort((a,b)=>String(a.expiryDate||'').localeCompare(String(b.expiryDate||'')));let remaining=q;for(const b of arr){if(remaining<=0)break;const inbound=purchaseQtyByBatch.get(String(b.id))||0,sold=saleQtyByBatch.get(String(b.id))||0,take=Math.min(Math.max(0,inbound-sold),remaining);if(take>0){addQty(saleQtyByBatch,b,take);remaining-=take}}}}
+  const adjustmentByBatch=new Map();
+  for(const m of (get('stockMovements',[])||[])){const type=String(m?.type||'').toUpperCase();if(type!=='STOCK_ADJUSTMENT'&&type!=='ADJUSTMENT')continue;const prod=resolveProduct(m?.productId,m?.productName||m?.medicine),b=prod?resolveBatch(prod,m):null;if(b)adjustmentByBatch.set(String(b.id),(adjustmentByBatch.get(String(b.id))||0)+Number(m?.qty||0))}
+  const totalByProduct=new Map();
+  for(const b of batches){const bid=String(b?.id||'');if(!bid)continue;const inbound=purchaseQtyByBatch.get(bid);let expected;if(inbound!==undefined)expected=Math.max(0,inbound-(saleQtyByBatch.get(bid)||0)+(returnedQtyByBatch.get(bid)||0)+Number(adjustmentByBatch.get(bid)||0));else expected=Math.max(0,Number(b?.stock||0));if(Math.abs(Number(b.stock||0)-expected)>0.000001){b.stock=expected;changed=true}const pid=String(b.productId||'');if(pid)totalByProduct.set(pid,(totalByProduct.get(pid)||0)+expected)}
+  for(const p of products){const pid=String(p?.id||'');if(!pid)continue;const total=totalByProduct.has(pid)?totalByProduct.get(pid):num(p.stock);if(Math.abs(num(p.stock)-total)>0.000001){p.stock=total;changed=true}}
+  if(changed){set('batches',batches);set('products',products)}
+  localStorage.setItem('skm_stock_reconciled_v8','yes');
 }
 
 async function loadAll(force=false){
@@ -665,7 +582,7 @@ showMedicineSuggestions('bMedicineSearch','bMedicineSuggest',pickBillMedicine);
 showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedicine);
 showMedicineSuggestions('mcSearch','mcSuggest',p=>{if(p){$('mcSearch').value=p.name;window.checkMedicineAvailability()}});
 $('mcSearch')?.addEventListener('input',()=>{if($('mcSearch').value.trim())window.checkMedicineAvailability();else if($('mcResult'))$('mcResult').innerHTML='<div class="small">Search any medicine to check availability.</div>'});
-window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
+window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const p=products.find(x=>String(x.id)===String(pid));const bs=p?batches.filter(b=>batchMatchesProduct(b,p)&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)):[];$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
 window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,manufacturer:b.manufacturer||b.manufacturerDetails||p.manufacturer||p.manufacturerDetails||'',qty,price});renderBilling()};
 /* Bill discount can be either a flat rupee amount or a percentage. */
 window.setDiscountType=(type)=>{
