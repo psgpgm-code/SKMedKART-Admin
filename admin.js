@@ -825,9 +825,14 @@ window.saveBill=async()=>{
  if(!billCart.length)return alert('Add at least one item.');
  const totals=billTotals(),customerName=$('bCustomer').value.trim()||'Walk-in Customer',mobile=$('bMobile').value.trim(),doctor=$('bDoctor').value.trim(),paymentMode=$('bPayment').value,note=$('bNote').value.trim();
  const items=billCart.map(x=>({...x,qty:Math.max(1,Number(x.qty||0))}));
- const nums=bills.map(b=>{const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0});
- const pending=getPendingBills();for(const b of pending){const m=String(b.invoiceNumber||'').match(/^SKM-(\d+)$/);if(m)nums.push(Number(m[1])||0)}
- const invoiceNumber='SKM-'+String(Math.max(0,...nums)+1).padStart(3,'0');
+ const pending=getPendingBills();
+ const usedInvoiceNumbers=new Set([...bills,...pending].map(b=>String(b?.invoiceNumber||'').trim()).filter(Boolean));
+ let nextInvoiceNo=Math.max(0,...[...usedInvoiceNumbers].map(v=>{const m=v.match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0}))+1;
+ let invoiceNumber='SKM-'+String(nextInvoiceNo).padStart(3,'0');
+ while(usedInvoiceNumbers.has(invoiceNumber)){
+   nextInvoiceNo++;
+   invoiceNumber='SKM-'+String(nextInvoiceNo).padStart(3,'0');
+ }
  const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Local'};
  const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
  const stockAlreadyReserved=!!(configured&&sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored); // Local-safe mode never trusts legacy online reservations.
