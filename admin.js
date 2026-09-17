@@ -487,7 +487,7 @@ function repairLocalStockConsistency(){
  }
  set('batches',batches);
  set('products',products);
- localStorage.setItem('skm_stock_reconciled_v9','yes');
+ localStorage.setItem('skm_stock_reconciled_v10','yes');
 }
 
 async function loadAll(force=false){
@@ -720,7 +720,6 @@ window.saveBill=async()=>{
  const usedInvoiceNumbers=new Set([...bills,...getPendingBills()]
     .map(b=>String(b?.invoiceNumber||'').trim())
     .filter(Boolean));
- const pending=getPendingBills();
  let nextInvoiceNo=0;
  for(const value of usedInvoiceNumbers){
    const m=value.match(/^SKM-(\d+)$/);
@@ -774,7 +773,14 @@ let __invoiceAssetsPromise=null;
 function invoiceAssets(){if(!__invoiceAssetsPromise)__invoiceAssetsPromise=Promise.all([assetDataUrl('./invoice-top-logo.png'),assetDataUrl('./invoice-footer-logo.jpg'),assetDataUrl('./pharmacist_signature.jpg')]).then(([topLogo,footerLogo,signature])=>({topLogo,footerLogo,signature}));return __invoiceAssetsPromise}
 function shopHeaderHtml(topLogo=''){return '<div class="invHeader"><div class="invBrand">'+(topLogo?'<img src="'+topLogo+'" class="invTopLogo" alt="Sri Krishna Medicals">':'')+'<div><div class="invShop">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram,<br>Dharmapuri District, Tamil Nadu - 636 810</div><div>Phone: <b>8300363317</b></div><div>Drug Licence No: TN/DPI/01386/2021</div><div>FSSAI Licence No: 22422039000512</div></div></div><div class="invMeta"><div class="invNo">Invoice '+esc(arguments.length>1?arguments[1]:'')+'</div></div></div>'}
 function invoiceCss(){return '<style>@page{size:A4;margin:8mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#12233f;margin:0;background:#fff}.invoicePage{width:100%;max-width:794px;margin:0 auto;border:1.5px solid #0b5aa6;padding:18px 18px 0;background:#fff}.invHeader{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #1b5f9f;padding-bottom:12px}.invBrand{display:flex;gap:12px;align-items:flex-start;font-size:13px;line-height:1.45}.invTopLogo{width:105px;height:105px;object-fit:contain}.invShop{font-size:27px;font-weight:800;color:#123f7c;margin-bottom:3px}.invMeta{min-width:245px}.invNo{background:#dff0ff;color:#123f7c;font-size:22px;font-weight:800;border-radius:8px;padding:10px 14px;text-align:center}.metaGrid{display:grid;grid-template-columns:90px minmax(0,1fr);gap:4px 7px;margin-top:9px;font-size:13px;color:#222}.metaGrid span{min-width:0;overflow-wrap:anywhere;word-break:break-word}.items{width:100%;border-collapse:collapse;margin-top:15px;font-size:12px}.items th{background:#dff0ff;color:#123f7c;font-weight:800}.items th,.items td{border:1px solid #333;padding:7px 6px}.items th:nth-child(1){width:7%}.items th:nth-child(2){width:27%}.items th:nth-child(3){width:17%}.items th:nth-child(4){width:17%}.items th:nth-child(5){width:8%}.items th:nth-child(6){width:12%}.items th:nth-child(7){width:12%}.r{text-align:right}.c{text-align:center}.bottomRow{display:flex;justify-content:space-between;gap:20px;margin-top:10px;align-items:flex-start}.totals{width:55%;font-size:14px;line-height:1.65;color:#222}.grand{background:#dff0ff;color:#123f7c;border-radius:7px;padding:5px 8px;font-size:19px;font-weight:800;margin-top:3px}.pay{font-size:14px;color:#222;margin-top:7px;line-height:1.5}.sig{width:38%;text-align:center;align-self:flex-end}.sig img{width:155px;height:78px;object-fit:contain;display:block;margin:0 auto -2px}.sigline{border-top:1px solid #333;width:180px;margin:0 auto}.siglabel{font-size:12px;color:#222;margin-top:4px}.footer{margin:10px -18px 0;border-top:2px solid #0b5aa6;background:#eef8ff;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 10px;font-size:11px;color:#124a82}.footerText{display:flex;align-items:center;gap:7px;flex:1;padding-left:6px;min-width:0;overflow:visible}.wa{font-weight:800}.footerLogo{width:150px;height:43px;object-fit:contain;border-radius:7px}.thanks{font-weight:700}.note{margin-top:2px}@media print{body{background:#fff}.invoicePage{border:0;max-width:none;padding:0}.footer{margin-top:10px}}</style>'}
-function findBill(id){const key=String(id??'');return bills.find(b=>String(b.id??'')===key||String(b.invoiceNumber??'')===key)||null}
+function findBill(id){
+ const key=String(id??'').trim();
+ if(!key)return null;
+ const byId=bills.find(b=>String(b?.id??'')===key);
+ if(byId)return byId;
+ const byInvoice=bills.filter(b=>String(b?.invoiceNumber??'')===key);
+ return byInvoice.length===1?byInvoice[0]:null;
+}
 window.itemManufacturer=function(i){const direct=i?.manufacturer||i?.manufacturerDetails||i?.maker||i?.makerName||'';if(direct)return direct;const p=products.find(x=>x.id===i?.productId)||{};const b=batches.find(x=>x.id===i?.batchId)||{};return p.manufacturer||p.manufacturerDetails||p.maker||p.makerName||b.manufacturer||b.manufacturerDetails||b.maker||b.makerName||''};const itemManufacturer=window.itemManufacturer;
 function buildInvoiceHtml(b,assets){const rows=(b.items||[]).map((i,n)=>'<tr><td class="c">'+(n+1)+'</td><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(window.itemManufacturer(i)||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td class="c">'+Number(i.qty||0)+'</td><td class="r">'+money(i.price)+'</td><td class="r">'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join('');return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title>'+invoiceCss()+'</head><body><div class="invoicePage"><div class="invHeader"><div class="invBrand"><img src="'+assets.topLogo+'" class="invTopLogo"><div><div class="invShop">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram,<br>Dharmapuri District, Tamil Nadu - 636 810</div><div>Phone: <b>8300363317</b></div><div>Drug Licence No: TN/DPI/01386/2021</div><div>FSSAI Licence No: 22422039000512</div></div></div><div class="invMeta"><div class="invNo">Invoice '+esc(b.invoiceNumber)+'</div><div class="metaGrid"><b>Date</b><span>'+esc(b.billDate||'-')+'</span><b>Customer</b><span>'+esc(b.customerName||'Walk-in Customer')+'</span><b>Mobile</b><span>'+esc(b.mobile||'-')+'</span><b>Prescribed By</b><span>'+esc(b.doctor||'-')+'</span></div></div></div><table class="items"><thead><tr><th>S.No</th><th>Medicine</th><th>Manufacturer</th><th>Batch</th><th>Qty</th><th>Rate (₹)</th><th>Amount (₹)</th></tr></thead><tbody>'+rows+'</tbody></table><div class="bottomRow"><div class="totals"><div><b>Subtotal</b> : '+money(b.subtotal)+'</div><div><b>Discount</b> : '+money(b.discount)+'</div><div><b>GST</b> : '+money(b.gst)+'</div><div class="grand"><b>Grand Total</b> : '+money(b.grandTotal)+'</div><div class="pay"><b>Payment Mode</b> : '+esc(b.paymentMode||'-')+'<br><span class="note"><b>Note</b> : '+esc(b.note||'-')+'</span></div></div><div class="sig"><img src="'+assets.signature+'" alt="Pharmacist Signature"><div class="sigline"></div><div class="siglabel">Pharmacist Signature</div></div></div><div class="footer"><div class="footerText"><span class="thanks">Thank you for purchasing</span><span>|</span><span>Order through WhatsApp by using <b class="wa">SKMedKART app</b></span></div><img src="'+assets.footerLogo+'" class="footerLogo" alt="SKMedKART"></div></div></body></html>'}
 async function billHtml(b){const assets=await invoiceAssets();return buildInvoiceHtml(b,assets)}
@@ -1045,7 +1051,12 @@ window.savePurchase=async()=>{
       b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
       // Do NOT overwrite existing batch supplier/purchase cost/GST. Those values
       // are purchase-entry specific and remain in Purchase History.
-    } else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
+    } else {
+      b={id:productId+'__'+batchNumber,productId,productName:purchase.productName,batchNumber,expiryDate,stock:qty,
+        mrp:purchase.mrp,sellingPrice:purchase.sellingPrice,category:purchase.category,cat:purchase.category,
+        schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails};
+      batches.push(b)
+    }
     product.stock=batches.filter(x=>String(x.productId)===String(product.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);if(purchase.sellingPrice)product.price=purchase.sellingPrice;product.manufacturer=purchase.manufacturer||product.manufacturer||'';product.manufacturerDetails=purchase.manufacturerDetails||product.manufacturerDetails||'';
     // Purchase-specific cost/GST are deliberately NOT copied into the product master.
     // Every Purchase History row keeps its own supplier, rate and GST from the bill.
@@ -1061,27 +1072,17 @@ window.renderPurchases=()=>{
  const input=$('purchaseSearch'),box=$('purchases');
  if(!input||!box)return;
  const q=String(input.value||'').trim().toLowerCase();
- if(!q){box.innerHTML=purchases.slice(0,100).map(p=>purchaseRow(p)).join('')||'<div class="small">No purchases found.</div>';return}
- const purchaseRows=purchases.filter(p=>{
-   const prod=products.find(x=>x.id===p.productId);
-   const text=[p.productName,p.medicine,p.name,p.supplier,p.supplierName,p.invoice,p.invoiceNo,p.batchNumber,p.batch,p.expiryDate,prod?.name,prod?.barcode].map(v=>String(v??'')).join(' ').toLowerCase();
-   return text.includes(q);
- }).slice(0,100);
- if(purchaseRows.length){box.innerHTML=purchaseRows.map(p=>purchaseRow(p)).join('');return}
- const productRows=products.filter(p=>{
-   const text=[p.name,p.barcode,p.cat,p.category].map(v=>String(v??'')).join(' ').toLowerCase();
-   return text.includes(q);
- }).slice(0,30);
- if(productRows.length){
-   const productIds=new Set(productRows.map(p=>p.id));
-   const linked=purchases.filter(p=>productIds.has(p.productId));
-   if(linked.length){box.innerHTML=linked.slice(0,100).map(p=>purchaseRow(p)).join('');return}
-   box.innerHTML=productRows.map(p=>'<div class="itemrow"><b>'+esc(p.name||'-')+'</b><br><span class="small">Current stock: '+Number(p.stock||0)+' • No purchase record found for this medicine.</span></div>').join('');
-   return;
- }
- box.innerHTML='<div class="small">No purchases or products found for “'+esc(input.value)+'”.</div>';
+ const rows=(purchases||[]).filter(p=>{
+   if(!q)return true;
+   const hay=[
+     p?.productName,p?.medicine,p?.name,p?.supplier,p?.supplierName,
+     p?.invoice,p?.invoiceNo,p?.batchNumber,p?.batch,p?.manufacturer,
+     p?.purchaseDate,p?.schedule,p?.category,p?.cat
+   ].map(v=>String(v??'').toLowerCase()).join(' ');
+   return hay.includes(q);
+ });
+ box.innerHTML=rows.slice(0,200).map(p=>purchaseRow(p)).join('')||'<div class="small">No purchases found for “'+esc(input.value)+'”.</div>';
 };
-
 function purchaseRow(p){const pid=esc(p.id||'');return '<div class=\"itemrow\"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class=\"small\">'+(p.manufacturer||p.manufacturerDetails?('Manufacturer: '+esc(p.manufacturer||p.manufacturerDetails)+' • '):'')+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span><div class=\"actions\"><button class=\"secondary\" type=\"button\" data-edit-purchase=\"'+pid+'\" onclick=\"window.editPurchase(this.dataset.editPurchase)\">✏️ Edit Purchase</button><button class=\"danger\" type=\"button\" data-delete-purchase=\"'+pid+'\" onclick=\"window.deletePurchase(this.dataset.deletePurchase)\">🗑️ Delete Purchase</button></div></div>'}
 
 window.deletePurchase=async id=>{
@@ -1103,7 +1104,7 @@ window.deletePurchase=async id=>{
    let sold=0;
    const seenBills=new Set();
    for(const bill of bills){
-     const key=String(bill?.invoiceNumber||bill?.id||''); if(!key||seenBills.has(key)||bill?.returned)continue; seenBills.add(key);
+     const key=String(bill?.id||''); if(!key||seenBills.has(key)||bill?.returned)continue; seenBills.add(key);
      for(const it of (bill.items||[])){
        if(String(it?.productId||'')!==String(purchase.productId))continue;
        if(String(it?.batchId||'')!==String(purchase.batchId||'') && String(it?.batchNumber||it?.batch||'')!==batchNumber)continue;
@@ -1292,7 +1293,14 @@ window.updateOrder=async id=>{
  }catch(e){alert('Could not update order: '+e.message)}
 };
 window.saveProduct=async()=>{const name=$('pname').value.trim(),price=Number($('pprice').value)||0,stock=Number($('pstock').value)||0,lowStockLevel=Math.max(0,Number($('pLow').value)||10),openingBatch=$('pBatch').value.trim(),openingExpiry=$('pExpiry').value;if(!name)return alert('Enter product name.');if(stock>0&&(!openingBatch||!openingExpiry))return alert('For opening stock, enter opening batch number and expiry date so billing stock remains batch-wise correct.');const barcode=$('pBarcode')?.value.trim()||'',purchasePrice=Number($('pPurchase')?.value)||0,mrp=Number($('pMrp')?.value)||0,gst=Number($('pGst')?.value)||0,supplier=$('pSupplier')?.value.trim()||'';
-const schedule=['H','H1'].includes(String($('pSchedule')?.value||'').toUpperCase())?String($('pSchedule').value).toUpperCase():'';const id=String(name).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,100)||'product_'+Date.now(),p={name,cat:$('pcat').value,price,stock,lowStockLevel,barcode,schedule,purchasePrice,mrp,gst,supplier,icon:$('picon').value.trim()||'💊',rx:$('prx').checked,active:true};try{const deleted=getDeletedProducts();deleted.delete(String(id));setDeletedProducts(deleted);if(configured){await runTransaction(db,async tx=>{const pr=doc(db,'products',id),ps=await tx.get(pr);if(stock>0){const br=doc(db,'batches',id+'__'+openingBatch),bs=await tx.get(br);tx.set(br,{...(bs.exists()?bs.data():{}),id:id+'__'+openingBatch,productId:id,productName:name,schedule,batchNumber:openingBatch,expiryDate:openingExpiry,stock:Number(bs.exists()?bs.data().stock||0:0)+stock,mrp:mrp||price,purchasePrice,sellingPrice:price,gst,updatedAt:serverTimestamp(),createdAt:serverTimestamp()},{merge:true})}tx.set(pr,{...p,stock:Number(ps.exists()?ps.data().stock||0:0)+stock,updatedAt:serverTimestamp(),createdAt:ps.exists()?ps.data().createdAt||serverTimestamp():serverTimestamp()},{merge:true})})}else{p.id=id;const i=products.findIndex(x=>x.id===id);if(i>=0){products[i].stock=Number(products[i].stock||0)+stock;Object.assign(products[i],p)}else products.push(p);if(stock>0){const bid=id+'__'+openingBatch,b=batches.find(x=>x.id===bid);if(b)b.stock+=stock;else batches.push({id:bid,productId:id,productName:name,batchNumber:openingBatch,expiryDate:openingExpiry,stock,mrp:price,sellingPrice:price})}p.stock=batches.filter(x=>String(x.productId)===String(id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);set('products',products);set('batches',batches)}alert('Product saved.');['pname','pBarcode','pprice','pPurchase','pMrp','pGst','pstock','pBatch','pExpiry','pSupplier','picon'].forEach(id=>$(id).value='');$('pLow').value=10;$('prx').checked=false;if($('pSchedule'))$('pSchedule').value='';renderAll()}catch(e){alert(e.message)}};
+const schedule=['H','H1'].includes(String($('pSchedule')?.value||'').toUpperCase())?String($('pSchedule').value).toUpperCase():'';const id=String(name).toLowerCase().replace(/[^a-z0-9]+/g,'_').replace(/^_|_$/g,'').slice(0,100)||'product_'+Date.now(),p={name,cat:$('pcat').value,price,stock,lowStockLevel,barcode,schedule,purchasePrice,mrp,gst,supplier,icon:$('picon').value.trim()||'💊',rx:$('prx').checked,active:true};try{const deleted=getDeletedProducts();deleted.delete(String(id));setDeletedProducts(deleted);if(configured){await runTransaction(db,async tx=>{const pr=doc(db,'products',id),ps=await tx.get(pr);if(stock>0){const br=doc(db,'batches',id+'__'+openingBatch),bs=await tx.get(br);tx.set(br,{...(bs.exists()?bs.data():{}),id:id+'__'+openingBatch,productId:id,productName:name,schedule,batchNumber:openingBatch,expiryDate:openingExpiry,stock:Number(bs.exists()?bs.data().stock||0:0)+stock,mrp:mrp||price,purchasePrice,sellingPrice:price,gst,updatedAt:serverTimestamp(),createdAt:serverTimestamp()},{merge:true})}tx.set(pr,{...p,stock:Number(ps.exists()?ps.data().stock||0:0)+stock,updatedAt:serverTimestamp(),createdAt:ps.exists()?ps.data().createdAt||serverTimestamp():serverTimestamp()},{merge:true})})}else{p.id=id;const i=products.findIndex(x=>x.id===id);if(i>=0){products[i].stock=Number(products[i].stock||0)+stock;Object.assign(products[i],p)}else products.push(p);if(stock>0){const bid=id+'__'+openingBatch,b=batches.find(x=>x.id===bid);if(b){
+        b.stock=Math.max(0,Number(b.stock||0))+stock;
+        b.openingStock=Math.max(0,Number(b.openingStock||0))+stock;
+        b.openingStockSource='MANUAL';
+        b.expiryDate=openingExpiry||b.expiryDate||'';
+        b.mrp=mrp||b.mrp||price;
+        b.sellingPrice=price||b.sellingPrice||price;
+      }else batches.push({id:bid,productId:id,productName:name,batchNumber:openingBatch,expiryDate:openingExpiry,stock,mrp:price,sellingPrice:price,openingStock:stock,openingStockSource:'MANUAL'})}p.stock=batches.filter(x=>String(x.productId)===String(id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);set('products',products);set('batches',batches)}alert('Product saved.');['pname','pBarcode','pprice','pPurchase','pMrp','pGst','pstock','pBatch','pExpiry','pSupplier','picon'].forEach(id=>$(id).value='');$('pLow').value=10;$('prx').checked=false;if($('pSchedule'))$('pSchedule').value='';renderAll()}catch(e){alert(e.message)}};
 window.deleteProduct=async id=>{const p=products.find(x=>x.id===id);if(!p)return alert('Product not found.');const related=batches.filter(b=>b.productId===id);if(!confirm('Delete '+(p.name||'this product')+' and its '+related.length+' batch(es)? This is only for a mistaken product upload and cannot be undone.'))return;try{if(configured){const wb=writeBatch(db);related.forEach(b=>wb.delete(doc(db,'batches',b.id)));wb.delete(doc(db,'products',id));await wb.commit();await addDoc(collection(db,'stockMovements'),{type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:serverTimestamp()});}const deleted=getDeletedProducts();deleted.add(String(id));setDeletedProducts(deleted);products=products.filter(x=>String(x.id)!==String(id));batches=batches.filter(b=>String(b.productId)!==String(id));set('products',products);set('batches',batches);if(!configured){const sm=get('stockMovements',[]);sm.push({id:'PDEL'+Date.now(),type:'PRODUCT_DELETE',productId:id,qty:-Number(p.stock||0),reference:'ADMIN_PRODUCT_DELETE',note:'Mistaken product upload deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Product and its related batches deleted successfully.');renderAll()}catch(e){alert('Could not delete product: '+e.message)}};
 window.setStockFilter=(filter)=>{const box=$('stockSummary');if(!box)return;box.dataset.filter=['all','out','expiry'].includes(filter)?filter:'all';renderStock();};
 let stockSearchTimer=null; let stockSearchIndex=[]; let stockBatchMap=new Map(); let stockExpiryMap=new Map();
@@ -1455,9 +1463,30 @@ window.viewScheduleMedicine=id=>{const p=products.find(x=>x.id===id);if(!p)retur
 function reminderDateOf(r){return r.nextDate||r.reminderDate||'';}
 function reminderStatus(r){const ds=reminderDateOf(r);if(!ds)return 'No date';const due=new Date(ds+'T00:00:00');const now=new Date();now.setHours(0,0,0,0);const diff=Math.round((due-now)/86400000);if(diff<0)return 'Overdue '+Math.abs(diff)+' day(s)';if(diff===0)return 'Due today';if(diff===1)return 'Due tomorrow';return 'Due in '+diff+' days';}
 window.saveReminder=async()=>{const customerName=$('rCustomer').value.trim(),mobile=$('rMobile').value.trim(),medicine=$('rMedicine').value.trim(),reminderDate=$('rDate').value,repeatDays=Math.max(1,Number($('rRepeatDays')?.value)||30),mode=$('rMode')?.value||'Monthly Medicine',note=$('rNote')?.value.trim()||'';if(!customerName||!mobile||!medicine||!reminderDate)return alert('Complete customer, mobile, medicine and reminder date.');const r={customerName,mobile,medicine,reminderDate,nextDate:reminderDate,repeatDays,mode,note,status:'Pending'};try{if(configured)await addDoc(collection(db,'reminders'),{...r,createdAt:serverTimestamp(),updatedAt:serverTimestamp()});else{r.id='R'+Date.now();r.createdAt=new Date().toISOString();reminders.push(r);persistReminders(reminders)}['rCustomer','rMobile','rMedicine','rDate','rNote'].forEach(id=>{$(id).value=''});if($('rRepeatDays'))$('rRepeatDays').value=30;alert('Customer reminder saved.');renderAll()}catch(e){alert(e.message)}};
-window.completeReminder=async id=>{const r=reminders.find(x=>x.id===id);if(!r)return;const repeat=Math.max(1,Number(r.repeatDays)||30);const base=reminderDateOf(r)||today();const d=new Date(base+'T00:00:00');d.setDate(d.getDate()+repeat);const nextDate=d.toISOString().slice(0,10);try{if(configured)await updateDoc(doc(db,'reminders',id),{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:serverTimestamp(),updatedAt:serverTimestamp()});else{Object.assign(r,{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:new Date().toISOString()});persistReminders(reminders)}renderAll();alert('Done. Next reminder: '+nextDate)}catch(e){alert(e.message)}};
+window.completeReminder=async id=>{
+ const r=reminders.find(x=>x.id===id);if(!r)return;
+ const repeat=Math.max(1,Number(r.repeatDays)||30),base=reminderDateOf(r)||today();
+ const completedAt=new Date().toISOString(),d=new Date(base+'T00:00:00');d.setDate(d.getDate()+repeat);
+ const nextDate=d.toISOString().slice(0,10);
+ const history=Array.isArray(r.history)?r.history.slice():[];
+ history.unshift({completedAt,completedDate:completedAt.slice(0,10),dueDate:base,nextDate,repeatDays:repeat});
+ // Keep history bounded so one long-running reminder cannot grow localStorage forever.
+ while(history.length>120)history.pop();
+ try{
+   if(configured)await updateDoc(doc(db,'reminders',id),{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:completedAt,history,updatedAt:serverTimestamp()});
+   else{Object.assign(r,{nextDate,reminderDate:nextDate,status:'Pending',lastDoneAt:completedAt,history});persistReminders(reminders)}
+   renderAll();alert('Done. Next reminder: '+nextDate)
+ }catch(e){alert(e.message)}
+};
+window.showReminderHistory=id=>{
+ const r=reminders.find(x=>String(x.id)===String(id));if(!r)return alert('Reminder not found.');
+ const rows=(Array.isArray(r.history)?r.history:[]).map((h,i)=>'<div class="itemrow"><b>#'+(i+1)+' Completed</b> • '+esc(h.completedDate||h.completedAt||'-')+'<br><span class="small">Due: '+esc(h.dueDate||'-')+' • Next: '+esc(h.nextDate||'-')+' • Every '+Number(h.repeatDays||r.repeatDays||30)+' days</span></div>').join('')||'<div class="small">No completed reminder history yet.</div>';
+ const box=$('billModalContent'),modal=$('billModal');if(!box||!modal)return alert('Reminder history screen is unavailable.');
+ box.innerHTML='<button class="secondary" style="float:right" onclick="closeBillView()">✕ Close</button><h3>🔔 Reminder History</h3><p><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(r.mobile||'')+'</span></p>'+rows;
+ modal.classList.remove('hidden');
+};
 window.deleteReminder=async id=>{if(!confirm('Delete this customer reminder?'))return;try{if(configured)await deleteDoc(doc(db,'reminders',id));else{reminders=reminders.filter(x=>x.id!==id);persistReminders(reminders)}renderAll()}catch(e){alert(e.message)}};
-function renderReminders(){const list=$('reminderList');if(!list)return;const now=new Date();now.setHours(0,0,0,0);const rs=reminders.slice().sort((x,y)=>String(reminderDateOf(x)).localeCompare(String(reminderDateOf(y))));const due=rs.filter(r=>{const ds=reminderDateOf(r);return ds&&new Date(ds+'T00:00:00')<=new Date(now.getTime()+7*86400000)});const count=$('reminderDueCount');if(count)count.textContent=due.length?('Due: '+due.length):'';list.innerHTML=rs.map(r=>{const ds=reminderDateOf(r),phone=String(r.mobile||'').replace(/\D/g,''),wa=phone.length===10?'91'+phone:phone,msg=encodeURIComponent('Hello '+(r.customerName||'')+', this is Sri Krishna Medicals, Pennagaram. Reminder for '+(r.medicine||'medicine')+'.');const diff=ds?Math.round((new Date(ds+'T00:00:00')-now)/86400000):99,cls=diff<0?'overdueReminder':diff<=7?'dueReminder':'';return '<div class="itemrow '+cls+'"><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(ds)+' • '+esc(reminderStatus(r))+' • Every '+Math.max(1,Number(r.repeatDays)||30)+' days • '+esc(r.mode||'Monthly Medicine')+'<br>'+esc(r.mobile||'')+(r.note?'<br>📝 '+esc(r.note):'')+'</span><div class="reminderActions"><button class="ok" onclick="completeReminder(\''+esc(r.id)+'\')">✓ Done / Next</button>'+(wa?'<a class="link" target="_blank" href="https://wa.me/'+esc(wa)+'?text='+msg+'">WhatsApp</a>':'')+'<button class="danger" onclick="deleteReminder(\''+esc(r.id)+'\')">Delete</button></div></div>'}).join('')||'<div class="small">No customer reminders yet.</div>';}
+function renderReminders(){const list=$('reminderList');if(!list)return;const now=new Date();now.setHours(0,0,0,0);const rs=reminders.slice().sort((x,y)=>String(reminderDateOf(x)).localeCompare(String(reminderDateOf(y))));const due=rs.filter(r=>{const ds=reminderDateOf(r);return ds&&new Date(ds+'T00:00:00')<=new Date(now.getTime()+7*86400000)});const count=$('reminderDueCount');if(count)count.textContent=due.length?('Due: '+due.length):'';list.innerHTML=rs.map(r=>{const ds=reminderDateOf(r),phone=String(r.mobile||'').replace(/\D/g,''),wa=phone.length===10?'91'+phone:phone,msg=encodeURIComponent('Hello '+(r.customerName||'')+', this is Sri Krishna Medicals, Pennagaram. Reminder for '+(r.medicine||'medicine')+'.');const diff=ds?Math.round((new Date(ds+'T00:00:00')-now)/86400000):99,cls=diff<0?'overdueReminder':diff<=7?'dueReminder':'';return '<div class="itemrow '+cls+'"><b>'+esc(r.customerName||'Customer')+'</b> • '+esc(r.medicine||'-')+'<br><span class="small">'+esc(ds)+' • '+esc(reminderStatus(r))+' • Every '+Math.max(1,Number(r.repeatDays)||30)+' days • '+esc(r.mode||'Monthly Medicine')+'<br>'+esc(r.mobile||'')+(r.note?'<br>📝 '+esc(r.note):'')+'</span><div class="reminderActions"><button class="ok" onclick="completeReminder(\''+esc(r.id)+'\')">✓ Done / Next</button>'+(wa?'<a class="link" target="_blank" href="https://wa.me/'+esc(wa)+'?text='+msg+'">WhatsApp</a>':'')+'<button class="secondary" onclick="showReminderHistory(\''+esc(r.id)+'\')">📜 History</button><button class="danger" onclick="deleteReminder(\''+esc(r.id)+'\')">Delete</button></div></div>'}).join('')||'<div class="small">No customer reminders yet.</div>';}
 
 // UI bridge for the matching V5.9 HTML. These handlers keep every visible button connected.
 window.showH1Purchases=()=>{

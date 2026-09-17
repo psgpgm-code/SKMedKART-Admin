@@ -1,0 +1,31 @@
+SKMedKART V5.9.67 — ROOT LEDGER / DATA-INTEGRITY RELEASE
+
+Source basis:
+- SKMedKART-Admin GitHub repository (main/admin.js + sw.js)
+- SKMedKART_BACKUP_2026-09-16_1789560663219.json
+
+Core rules:
+1. Purchase History is the inbound ledger; reconciliation never creates/recover/re-dates purchases.
+2. Bills are unique by bill.id, never by invoiceNumber.
+3. Purchase-backed batch stock = explicit opening stock + purchase qty - non-returned billed qty + explicit adjustments.
+4. Returned bills are not counted as sales.
+5. Normal app load does not reconcile or mutate stock.
+6. Reconciliation never creates synthetic batches.
+7. Product stock is recalculated from actual batch stock by product ID.
+8. New invoices use a free SKM-### number; existing historical invoice numbers are preserved.
+9. Editing an old purchase preserves its original date unless the user changes it.
+10. Blank supplier during edit does not erase an existing supplier.
+11. Purchase search searches medicine, supplier, invoice, batch, manufacturer, date, category and schedule.
+12. Reminder completion stores a bounded completion history.
+13. Opening-stock batches are explicitly marked as MANUAL opening stock.
+14. Service worker does not dynamically rewrite admin.js and clears old SKMedKART admin caches.
+
+IMPORTANT:
+The supplied backup contains the real historical Zoester purchase rows:
+- 2026-08-05, Qty 2, batch DLQF6001, Tirumalai Age-Kptm
+- 2026-08-26, Qty 2, batch DLQF5005, Gunavathi Medical Traders
+and two sales on 2026-09-09 totaling Qty 3 under bill id B17889254754996uh4.
+Therefore the ledger result is Qty 1.
+
+The application cannot safely reconstruct a deleted historical purchase from corrupted localStorage.
+Restore the supplied 2026-09-16 backup once after installing this release so the canonical purchase/batch snapshot is loaded.
