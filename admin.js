@@ -71,89 +71,7 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-let purchasesDbPromise=null;
-let purchasesStoreReady=false;
-let purchasesWriteSerial=Promise.resolve();
-const PURCHASE_DB_NAME='SKMedKART_LocalStore_v1';
-const PURCHASE_DB_STORE='data';
-function openPurchasesDb(){
-  if(purchasesDbPromise)return purchasesDbPromise;
-  purchasesDbPromise=new Promise((resolve,reject)=>{
-    try{
-      if(!window.indexedDB)return reject(new Error('IndexedDB unavailable'));
-      const req=indexedDB.open(PURCHASE_DB_NAME,1);
-      req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains(PURCHASE_DB_STORE))db.createObjectStore(PURCHASE_DB_STORE)};
-      req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));
-    }catch(e){reject(e)}
-  });
-  return purchasesDbPromise;
-}
-async function readPurchasesStore(){
-  try{
-    const db=await openPurchasesDb();
-    const rows=await new Promise((resolve,reject)=>{
-      const tx=db.transaction(PURCHASE_DB_STORE,'readonly'),req=tx.objectStore(PURCHASE_DB_STORE).get('purchases');
-      req.onsuccess=()=>resolve(req.result?.rows); req.onerror=()=>reject(req.error);
-    });
-    if(Array.isArray(rows)){purchasesStoreReady=true;return rows}
-  }catch(e){console.warn('IndexedDB purchase read failed:',e)}
-  try{
-    const legacy=JSON.parse(localStorage.getItem(K+'purchases')||'[]');
-    if(Array.isArray(legacy)){
-      purchasesStoreReady=false;
-      // Migration is attempted asynchronously after the in-memory copy is safe.
-      savePurchasesStore(legacy,true);
-      return legacy;
-    }
-  }catch(e){console.warn('Legacy purchase read failed:',e)}
-  return [];
-}
-async function savePurchasesStore(rows,removeLegacy=false){
-  const safe=Array.isArray(rows)?rows:[];
-  purchasesWriteSerial=purchasesWriteSerial.then(async()=>{
-    try{
-      const db=await openPurchasesDb();
-      await new Promise((resolve,reject)=>{
-        const tx=db.transaction(PURCHASE_DB_STORE,'readwrite');
-        tx.objectStore(PURCHASE_DB_STORE).put({rows:safe,updatedAt:Date.now()},'purchases');
-        tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error||new Error('IndexedDB purchase save failed')); tx.onabort=()=>reject(tx.error||new Error('IndexedDB purchase save aborted'));
-      });
-      purchasesStoreReady=true;
-      // Once the complete purchase ledger is safely in IndexedDB, remove the old
-      // large localStorage copy. This is the actual quota fix; no purchase records
-      // are deleted from the in-memory ledger.
-      try{localStorage.removeItem(K+'purchases')}catch(e){console.warn('Legacy purchase key cleanup failed:',e)}
-      return true;
-    }catch(e){
-      purchasesStoreReady=false;
-      console.warn('IndexedDB purchase save failed:',e);
-      // Keep a compact legacy fallback only if it fits. Never throw a quota error
-      // back into Purchase Entry: the in-memory purchase ledger remains intact.
-      try{localStorage.setItem(K+'purchases',JSON.stringify(safe))}catch(e2){console.warn('Legacy purchase fallback also exceeded quota:',e2)}
-      return false;
-    }
-  }).catch(()=>false);
-  return purchasesWriteSerial;
-}
-async function loadPurchasesStore(){
-  const rows=await readPurchasesStore();
-  purchases=Array.isArray(rows)?rows:[];
-  return purchases;
-}
-const get=(k,d)=>{
-  if(k==='purchases')return Array.isArray(purchases)?purchases:d;
-  try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}
-};
-const set=(k,v)=>{
-  if(k==='purchases'){
-    purchases=Array.isArray(v)?v:[];
-    // Purchase History is the largest local ledger. Store it in IndexedDB so a
-    // normal purchase update cannot fail because the localStorage 5 MB quota is full.
-    return savePurchasesStore(purchases);
-  }
-  try{localStorage.setItem(K+k,JSON.stringify(v));return true}
-  catch(e){console.warn('Local storage save failed for '+k+':',e);return false}
-};
+const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -598,14 +516,57 @@ function repairLocalStockConsistency(){
  localStorage.setItem('skm_stock_reconciled_v7','yes');
 }
 
+function repairDuplicateInvoiceNumbers(){
+ if(configured||!Array.isArray(bills)||!bills.length)return false;
+ const used=new Set();
+ const groups=new Map();
+ for(const b of bills){
+  const inv=String(b?.invoiceNumber||'').trim();
+  const m=inv.match(/^SKM-(\d+)$/);
+  if(!m)continue;
+  const n=Number(m[1]);
+  if(!groups.has(inv))groups.set(inv,[]);
+  groups.get(inv).push(b);
+  used.add(n);
+ }
+ let changed=false;
+ for(const [inv,rows] of groups){
+  if(rows.length<2)continue;
+  rows.sort((a,b)=>t(a?.createdAt||a?.billDate)-t(b?.createdAt||b?.billDate)||String(a?.id||'').localeCompare(String(b?.id||'')));
+  const base=Number(inv.match(/^SKM-(\d+)$/)[1]);
+  let next=base+1;
+  for(let i=1;i<rows.length;i++){
+   while(used.has(next))next++;
+   const old=String(rows[i].invoiceNumber||'');
+   const fresh='SKM-'+String(next).padStart(3,'0');
+   rows[i].invoiceNumber=fresh;
+   used.add(next++);
+   changed=true;
+   // Keep stock-movement references consistent where they uniquely point to
+   // this bill through its generated bill id.
+   const moves=get('stockMovements',[]);
+   if(Array.isArray(moves)){
+    let moveChanged=false;
+    for(const m of moves){
+     if(String(m?.reference||'')===old && String(m?.id||'').startsWith(String(rows[i]?.id||'')+'_SM')){m.reference=fresh;moveChanged=true}
+    }
+    if(moveChanged)set('stockMovements',moves);
+   }
+  }
+ }
+ if(changed)set('bills',bills);
+ if(changed)localStorage.setItem('skm_invoice_numbers_repaired_v1','yes');
+ return changed;
+}
+
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);await loadPurchasesStore();batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairDuplicateInvoiceNumbers();repairLocalStockConsistency();renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
  // Preserve existing local records before Firebase listeners start. A cloud snapshot must not make locally saved products disappear.
- products=get('products',products).filter(x=>!getDeletedProducts().has(String(x.id)));currentOrders=get('orders',currentOrders);await loadPurchasesStore();batches=get('batches',batches);bills=get('bills',bills);customers=get('customers',customers);reminders=get('reminders',reminders);suppliers=get('suppliers',suppliers);
+ products=get('products',products).filter(x=>!getDeletedProducts().has(String(x.id)));currentOrders=get('orders',currentOrders);purchases=get('purchases',purchases);batches=get('batches',batches);bills=get('bills',bills);customers=get('customers',customers);reminders=get('reminders',reminders);suppliers=get('suppliers',suppliers);
  liveStarted=true;
  const mergeRemoteKeepLocal=(localRows,remoteRows)=>{const map=new Map((localRows||[]).map(x=>[String(x?.id||''),x]));for(const x of (remoteRows||[])){const id=String(x?.id||'');if(id)map.set(id,x)}return [...map.values()]};
  const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{const rows=s.docs.map(d=>({id:d.id,...d.data()}));if(name==='products'){const deleted=getDeletedProducts();assign(rows.filter(x=>!deleted.has(String(x.id))))}else assign(rows);if(name==='bills')bills=mergePendingBills(bills);if(name==='products'||name==='batches')applyPendingStockOverlay();renderAll();schedulePendingBillSync()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync issue</b><br><span class="small">Billing remains available; local changes are retained and will retry automatically.</span>'});
@@ -829,10 +790,7 @@ window.saveBill=async()=>{
  const usedInvoiceNumbers=new Set([...bills,...pending].map(b=>String(b?.invoiceNumber||'').trim()).filter(Boolean));
  let nextInvoiceNo=Math.max(0,...[...usedInvoiceNumbers].map(v=>{const m=v.match(/^SKM-(\d+)$/);return m?Number(m[1])||0:0}))+1;
  let invoiceNumber='SKM-'+String(nextInvoiceNo).padStart(3,'0');
- while(usedInvoiceNumbers.has(invoiceNumber)){
-   nextInvoiceNo++;
-   invoiceNumber='SKM-'+String(nextInvoiceNo).padStart(3,'0');
- }
+ while(usedInvoiceNumbers.has(invoiceNumber)){nextInvoiceNo++;invoiceNumber='SKM-'+String(nextInvoiceNo).padStart(3,'0');}
  const bill={id:'B'+Date.now()+Math.random().toString(36).slice(2,6),invoiceNumber,customerName,mobile,doctor,paymentMode,note,items,...totals,billDate:today(),sourceOrderId:sourceOrderId||'',createdAt:new Date().toISOString(),syncStatus:'Local'};
  const sourceOrder=sourceOrderId?currentOrders.find(x=>x.id===sourceOrderId):null;
  const stockAlreadyReserved=!!(configured&&sourceOrder&&orderHasStockReservation(sourceOrder)&&!sourceOrder.stockRestored); // Local-safe mode never trusts legacy online reservations.
@@ -1000,8 +958,8 @@ async function restoreData(data){
   // not subtract "duplicate" purchases from the snapshot, because that can turn a
   // correct batch quantity into an incorrect one. The stock-integrity reconciliation
   // below handles legacy missing movement/batch links without double-adding stock.
-  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];const saved=set(name,rows);if(name==='purchases'&&saved?.then)await saved}
-  products=get('products',[]);await loadPurchasesStore();batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
+  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];set(name,rows)}
+  products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
   repairLocalStockConsistency();
   localStorage.setItem('skm_stock_repair_v5_done','yes');
  }
