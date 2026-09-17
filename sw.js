@@ -1,4 +1,4 @@
-const CACHE='skmedkart-admin-v5.9.68-root-ledger';
+const CACHE='skmedkart-admin-v5.9.70-ledger-final';
 const ASSETS=[
   './',
   './index.html',
