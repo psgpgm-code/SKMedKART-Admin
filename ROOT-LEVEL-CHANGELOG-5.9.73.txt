@@ -1,0 +1,25 @@
+SKMedKART V5.9.73 — CANONICAL PURCHASE → SALES → REMAINING STOCK
+
+This release fixes the stock calculation at ledger level.
+
+1. Each exact Product ID + Batch is calculated independently.
+2. Purchase quantity comes from Purchase History records for that batch.
+3. Sales quantity comes from non-returned bills using unique bill.id.
+4. Remaining = explicit opening stock + purchase qty - sold qty + explicit stock adjustments.
+5. If a batch has no Purchase History, no fake purchase is created; its existing physical stock is preserved.
+6. Product stock is the sum of its batch remaining stock by Product ID. Same-name products are NOT merged.
+7. Current stock is NOT reduced merely because a batch is expired. Expiry remains a separate alert.
+8. Purchase History is never recovered, re-dated, filtered out, or rewritten by stock reconciliation.
+9. Report Purchase Value uses the stored Purchase History directly; no recovered-record filter is applied.
+10. Duplicate invoice numbers do not merge bills.
+11. Service worker cache is v5.9.73 and fetches admin.js with no-store to prevent stale code.
+
+Backup verification (2026-09-16 backup):
+Zoester = 4 purchased - 3 sold = 1 remaining.
+Acemoser P = 112 - 26 = 86.
+Beeceekem syrup 100ml = 3 - 1 = 2.
+Moneresp LC Kid sus-60ml = 14 - 9 = 5.
+Bioskin soap 75gm = 3 - 1 = 2.
+Alkof Junior 60ml = 15 - 10 = 5.
+Stored zero-stock products = 46; ledger rebuild keeps 46 zero-stock products on this backup.
+All purchase records remain included in Purchase Value calculation.
