@@ -347,13 +347,13 @@ function repairLocalStockConsistency(){
      const expected=opening+purchaseQty-sales+adjustments;b.stock=Math.max(0,expected);
      if(expected<0){b.stockIntegrityStatus='SALE_EXCEEDS_LEDGER';b.stockIntegrityExpected=expected;b.stockIntegrityDifference=-expected}else{delete b.stockIntegrityStatus;delete b.stockIntegrityExpected;delete b.stockIntegrityDifference;}
    }else{
-     // No purchase history: treat existing stock as legacy opening/unrecorded stock.
-     // Historical sales are incorporated into the opening figure so current balance remains exact.
-     const current=Math.max(0,rows.reduce((mx,r)=>Math.max(mx,Number(r?.stock||0)),0));
-     const inferredOpening=current+sales-Math.min(0,adjustments);
-     b.openingStock=Number.isFinite(inferredOpening)?Math.max(0,inferredOpening):current;
-     b.openingStockSource=b.openingStockSource||'LEGACY_OPENING';
-     b.stock=Math.max(0,b.openingStock-sales+adjustments);
+     // NO PURCHASE HISTORY: do not manufacture an opening quantity from current stock.
+     // Legacy/unrecorded batches are preserved as-is because there is no trustworthy
+     // inbound ledger from which to derive a different quantity. Their stock is NOT
+     // used to manufacture purchase history, and purchase-backed batches above are
+     // always calculated from Purchase History + actual Bill IDs.
+     const legacy=old?Math.max(0,Number(old.stock||0)):0;
+     b.stock=legacy;
      b.stockIntegrityStatus='UNRECORDED_OPENING_STOCK';
    }
    nextBatches.push(b);
@@ -362,12 +362,12 @@ function repairLocalStockConsistency(){
  batches=nextBatches;
  const totalsByProduct=new Map();for(const b of batches){const pid=String(b.productId||'');if(pid)totalsByProduct.set(pid,(totalsByProduct.get(pid)||0)+Math.max(0,Number(b.stock||0)));}
  for(const p of products){const pid=String(p?.id||'');if(pid)p.stock=Math.max(0,Number(totalsByProduct.get(pid)||0));}
- set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v11','yes');
+ set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v12','yes');
  return {batchCount:batches.length,productCount:products.length};
 }
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);if(localStorage.getItem('skm_stock_reconciled_v11')!=='yes')repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
@@ -781,7 +781,7 @@ async function restoreData(data){
   for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];set(name,rows)}
   products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
   repairLocalStockConsistency();
-  localStorage.setItem('skm_stock_repair_v5_done','yes');localStorage.setItem('skm_stock_reconciled_v11','yes');
+  localStorage.setItem('skm_stock_repair_v6_done','yes');localStorage.setItem('skm_stock_reconciled_v12','yes');
  }
 }
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});

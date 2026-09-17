@@ -42,3 +42,5 @@ SERVICE WORKER
 - Cache name updated to V5.9.68.
 - Old SKMedKART admin caches are removed on activation.
 - admin.js is fetched as the repository source; the service worker does not rewrite it dynamically.
+
+V5.9.69 correction: no-purchase legacy batches are preserved, not reverse-engineered into fake opening stock; normal app load never runs reconciliation.
