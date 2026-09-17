@@ -1,0 +1,20 @@
+SKMedKART V5.9.74
+CANONICAL PURCHASE -> SALES -> REMAINING STOCK
+
+One-time verified 2026-09-16 snapshot migration repairs the local phone data without requiring another backup upload.
+Purchase history is restored from the verified snapshot; legacy recovered purchase rows are excluded.
+Bills are identified by unique bill.id, never by invoice number.
+Batch stock is calculated from opening + purchase - non-returned sales + explicit adjustments.
+Legacy synthetic batches with no purchase/opening evidence are not retained; genuine newer local batches with a purchase or explicit manual opening stock are retained.
+Product stock is the sum of actual batch remaining stock; products without batches retain existing stock.
+Normal load does not repeatedly mutate stock.
+Report Purchase Value uses Purchase History and is independent of stock.
+
+Verified checks from supplied backup:
+Zoester 4 - 3 = 1
+Acemoser P 112 - 26 = 86
+Beeceekem 3 - 1 = 2
+Moneresp 14 - 9 = 5
+Bioskin 3 - 1 = 2
+Alkof Junior 15 - 10 = 5
+Out-of-stock products after canonical batch rebuild: 46
