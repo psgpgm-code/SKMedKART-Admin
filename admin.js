@@ -124,7 +124,7 @@ function recoverMissingLocalReminders(){
   return false;
 }
 
-const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>new Date().toISOString().slice(0,10); const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+const t=v=>v?.toDate?v.toDate().getTime():new Date(v||0).getTime(); const today=()=>{const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}; const money=n=>'₹'+Number(n||0).toFixed(2); const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 $('notice').innerHTML='<b>📱 Offline + Billing Safe mode</b><br><span class="small">Bills, purchases and stock are saved safely on this phone. Firebase is not used, so quota errors will not affect billing.</span>';
 function loginMessage(text,type='info'){const el=$('loginMessage');if(!el)return;el.textContent=text;el.className='loginMessage '+type}
 function clearLoginMessage(){const el=$('loginMessage');if(el){el.textContent='';el.className='loginMessage hidden'}}
@@ -473,20 +473,19 @@ function repairLocalStockConsistency(){
    const current=Math.max(0,Number(b?.stock||0));
    let expected;
    if(purchaseBase!==undefined){
-     // IMPORTANT: current stock may contain opening stock that was already present
-     // before the first Purchase Entry. The old reconciliation treated Purchase Qty
-     // as the complete inbound stock and silently removed that opening balance.
-     // Capture that pre-existing balance once, without changing today's stock.
-     let opening=Number(b?.openingStock);
-     if(!Number.isFinite(opening)||opening<0){
-       opening=Math.max(0,current-Number(purchaseBase||0)+sales-adjustments);
-       b.openingStock=opening;
-       b.openingStockInitializedAt=b.openingStockInitializedAt||new Date().toISOString();
+     // V5.9.63 ROOT FIX: purchase-backed stock is deterministic.
+     // Never infer opening stock from current stock. Earlier reconciliation could
+     // turn a bad current balance into permanent opening stock and keep inflating it.
+     // The openingStock fields created by those repairs were inferred, not a user
+     // entered opening balance, so remove them from purchase-backed batches.
+     if(b.openingStock!==undefined||b.openingStockInitializedAt!==undefined){
+       delete b.openingStock;
+       delete b.openingStockInitializedAt;
        changed=true;
      }
-     expected=Math.max(0,opening+Number(purchaseBase||0)-sales+adjustments);
+     expected=Math.max(0,Number(purchaseBase||0)-sales+adjustments);
    }else{
-     // No purchase ledger: this is opening/unlinked stock. Preserve it exactly.
+     // No purchase ledger: preserve genuine opening/unlinked physical stock.
      expected=current;
      if(!Number.isFinite(Number(b?.openingStock))||Number(b.openingStock)<0){
        b.openingStock=current;
@@ -513,55 +512,12 @@ function repairLocalStockConsistency(){
    if(total!==undefined&&Math.abs(Number(p?.stock||0)-total)>0.000001){p.stock=total;changed=true}
  }
  if(changed){set('batches',batches);set('products',products)}
- localStorage.setItem('skm_stock_reconciled_v7','yes');
-}
-
-function repairDuplicateInvoiceNumbers(){
- if(configured||!Array.isArray(bills)||!bills.length)return false;
- const used=new Set();
- const groups=new Map();
- for(const b of bills){
-  const inv=String(b?.invoiceNumber||'').trim();
-  const m=inv.match(/^SKM-(\d+)$/);
-  if(!m)continue;
-  const n=Number(m[1]);
-  if(!groups.has(inv))groups.set(inv,[]);
-  groups.get(inv).push(b);
-  used.add(n);
- }
- let changed=false;
- for(const [inv,rows] of groups){
-  if(rows.length<2)continue;
-  rows.sort((a,b)=>t(a?.createdAt||a?.billDate)-t(b?.createdAt||b?.billDate)||String(a?.id||'').localeCompare(String(b?.id||'')));
-  const base=Number(inv.match(/^SKM-(\d+)$/)[1]);
-  let next=base+1;
-  for(let i=1;i<rows.length;i++){
-   while(used.has(next))next++;
-   const old=String(rows[i].invoiceNumber||'');
-   const fresh='SKM-'+String(next).padStart(3,'0');
-   rows[i].invoiceNumber=fresh;
-   used.add(next++);
-   changed=true;
-   // Keep stock-movement references consistent where they uniquely point to
-   // this bill through its generated bill id.
-   const moves=get('stockMovements',[]);
-   if(Array.isArray(moves)){
-    let moveChanged=false;
-    for(const m of moves){
-     if(String(m?.reference||'')===old && String(m?.id||'').startsWith(String(rows[i]?.id||'')+'_SM')){m.reference=fresh;moveChanged=true}
-    }
-    if(moveChanged)set('stockMovements',moves);
-   }
-  }
- }
- if(changed)set('bills',bills);
- if(changed)localStorage.setItem('skm_invoice_numbers_repaired_v1','yes');
- return changed;
+ localStorage.setItem('skm_stock_reconciled_v9','yes');
 }
 
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairDuplicateInvoiceNumbers();repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
@@ -1158,7 +1114,7 @@ window.deletePurchase=async id=>{
    let sold=0;
    const seenBills=new Set();
    for(const bill of bills){
-     const key=String(bill?.invoiceNumber||bill?.id||''); if(!key||seenBills.has(key)||bill?.returned)continue; seenBills.add(key);
+     const key=String(bill?.id||''); if(!key||seenBills.has(key)||bill?.returned)continue; seenBills.add(key);
      for(const it of (bill.items||[])){
        if(String(it?.productId||'')!==String(purchase.productId))continue;
        if(String(it?.batchId||'')!==String(purchase.batchId||'') && String(it?.batchNumber||it?.batch||'')!==batchNumber)continue;
