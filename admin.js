@@ -71,7 +71,89 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+let purchasesDbPromise=null;
+let purchasesStoreReady=false;
+let purchasesWriteSerial=Promise.resolve();
+const PURCHASE_DB_NAME='SKMedKART_LocalStore_v1';
+const PURCHASE_DB_STORE='data';
+function openPurchasesDb(){
+  if(purchasesDbPromise)return purchasesDbPromise;
+  purchasesDbPromise=new Promise((resolve,reject)=>{
+    try{
+      if(!window.indexedDB)return reject(new Error('IndexedDB unavailable'));
+      const req=indexedDB.open(PURCHASE_DB_NAME,1);
+      req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains(PURCHASE_DB_STORE))db.createObjectStore(PURCHASE_DB_STORE)};
+      req.onsuccess=()=>resolve(req.result); req.onerror=()=>reject(req.error||new Error('IndexedDB open failed'));
+    }catch(e){reject(e)}
+  });
+  return purchasesDbPromise;
+}
+async function readPurchasesStore(){
+  try{
+    const db=await openPurchasesDb();
+    const rows=await new Promise((resolve,reject)=>{
+      const tx=db.transaction(PURCHASE_DB_STORE,'readonly'),req=tx.objectStore(PURCHASE_DB_STORE).get('purchases');
+      req.onsuccess=()=>resolve(req.result?.rows); req.onerror=()=>reject(req.error);
+    });
+    if(Array.isArray(rows)){purchasesStoreReady=true;return rows}
+  }catch(e){console.warn('IndexedDB purchase read failed:',e)}
+  try{
+    const legacy=JSON.parse(localStorage.getItem(K+'purchases')||'[]');
+    if(Array.isArray(legacy)){
+      purchasesStoreReady=false;
+      // Migration is attempted asynchronously after the in-memory copy is safe.
+      savePurchasesStore(legacy,true);
+      return legacy;
+    }
+  }catch(e){console.warn('Legacy purchase read failed:',e)}
+  return [];
+}
+async function savePurchasesStore(rows,removeLegacy=false){
+  const safe=Array.isArray(rows)?rows:[];
+  purchasesWriteSerial=purchasesWriteSerial.then(async()=>{
+    try{
+      const db=await openPurchasesDb();
+      await new Promise((resolve,reject)=>{
+        const tx=db.transaction(PURCHASE_DB_STORE,'readwrite');
+        tx.objectStore(PURCHASE_DB_STORE).put({rows:safe,updatedAt:Date.now()},'purchases');
+        tx.oncomplete=resolve; tx.onerror=()=>reject(tx.error||new Error('IndexedDB purchase save failed')); tx.onabort=()=>reject(tx.error||new Error('IndexedDB purchase save aborted'));
+      });
+      purchasesStoreReady=true;
+      // Once the complete purchase ledger is safely in IndexedDB, remove the old
+      // large localStorage copy. This is the actual quota fix; no purchase records
+      // are deleted from the in-memory ledger.
+      try{localStorage.removeItem(K+'purchases')}catch(e){console.warn('Legacy purchase key cleanup failed:',e)}
+      return true;
+    }catch(e){
+      purchasesStoreReady=false;
+      console.warn('IndexedDB purchase save failed:',e);
+      // Keep a compact legacy fallback only if it fits. Never throw a quota error
+      // back into Purchase Entry: the in-memory purchase ledger remains intact.
+      try{localStorage.setItem(K+'purchases',JSON.stringify(safe))}catch(e2){console.warn('Legacy purchase fallback also exceeded quota:',e2)}
+      return false;
+    }
+  }).catch(()=>false);
+  return purchasesWriteSerial;
+}
+async function loadPurchasesStore(){
+  const rows=await readPurchasesStore();
+  purchases=Array.isArray(rows)?rows:[];
+  return purchases;
+}
+const get=(k,d)=>{
+  if(k==='purchases')return Array.isArray(purchases)?purchases:d;
+  try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}
+};
+const set=(k,v)=>{
+  if(k==='purchases'){
+    purchases=Array.isArray(v)?v:[];
+    // Purchase History is the largest local ledger. Store it in IndexedDB so a
+    // normal purchase update cannot fail because the localStorage 5 MB quota is full.
+    return savePurchasesStore(purchases);
+  }
+  try{localStorage.setItem(K+k,JSON.stringify(v));return true}
+  catch(e){console.warn('Local storage save failed for '+k+':',e);return false}
+};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -518,12 +600,12 @@ function repairLocalStockConsistency(){
 
 async function loadAll(force=false){
  recoverMissingLocalReminders();
- if(!configured){products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
+ if(!configured){products=get('products',[]);currentOrders=get('orders',[]);await loadPurchasesStore();batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);repairLocalStockConsistency();renderAll();return}
  if(liveStarted&&!force){renderAll();schedulePendingBillSync();return}
  if(force){location.reload();return}
  if(!db)await ensureFirebase();
  // Preserve existing local records before Firebase listeners start. A cloud snapshot must not make locally saved products disappear.
- products=get('products',products).filter(x=>!getDeletedProducts().has(String(x.id)));currentOrders=get('orders',currentOrders);purchases=get('purchases',purchases);batches=get('batches',batches);bills=get('bills',bills);customers=get('customers',customers);reminders=get('reminders',reminders);suppliers=get('suppliers',suppliers);
+ products=get('products',products).filter(x=>!getDeletedProducts().has(String(x.id)));currentOrders=get('orders',currentOrders);await loadPurchasesStore();batches=get('batches',batches);bills=get('bills',bills);customers=get('customers',customers);reminders=get('reminders',reminders);suppliers=get('suppliers',suppliers);
  liveStarted=true;
  const mergeRemoteKeepLocal=(localRows,remoteRows)=>{const map=new Map((localRows||[]).map(x=>[String(x?.id||''),x]));for(const x of (remoteRows||[])){const id=String(x?.id||'');if(id)map.set(id,x)}return [...map.values()]};
  const listen=(name,assign)=>onSnapshot(collection(db,name),s=>{const rows=s.docs.map(d=>({id:d.id,...d.data()}));if(name==='products'){const deleted=getDeletedProducts();assign(rows.filter(x=>!deleted.has(String(x.id))))}else assign(rows);if(name==='bills')bills=mergePendingBills(bills);if(name==='products'||name==='batches')applyPendingStockOverlay();renderAll();schedulePendingBillSync()},e=>{console.error('Firebase '+name+' error:',e);const n=$('notice');if(n)n.innerHTML='<b>⚠️ Firebase '+esc(name)+' sync issue</b><br><span class="small">Billing remains available; local changes are retained and will retry automatically.</span>'});
@@ -913,8 +995,8 @@ async function restoreData(data){
   // not subtract "duplicate" purchases from the snapshot, because that can turn a
   // correct batch quantity into an incorrect one. The stock-integrity reconciliation
   // below handles legacy missing movement/batch links without double-adding stock.
-  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];set(name,rows)}
-  products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
+  for(const name of backupCollections){const rows=Array.isArray(data.collections[name])?data.collections[name]:[];const saved=set(name,rows);if(name==='purchases'&&saved?.then)await saved}
+  products=get('products',[]);await loadPurchasesStore();batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
   repairLocalStockConsistency();
   localStorage.setItem('skm_stock_repair_v5_done','yes');
  }
