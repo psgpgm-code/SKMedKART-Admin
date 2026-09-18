@@ -34,14 +34,58 @@ function catalogRows(){
 async function publishCustomerCatalog(force=false){
   if(catalogPublishBusy)return;
   if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+
   catalogPublishBusy=true;
+  const status=$('catalogSyncStatus');
+  if(status)status.textContent='Updating Customer catalogue...';
+
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),12000);
+
   try{
     const payload=catalogRows();
-    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Authorization':'Bearer '+SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:payload})});
-    if(!r.ok){const text=await r.text();throw Error(text||('HTTP '+r.status));}
-    const status=$('catalogSyncStatus');if(status)status.textContent='Customer catalogue updated: '+payload.length+' products • '+new Date().toLocaleTimeString('en-IN');
-  }catch(e){console.warn('Customer catalogue sync skipped:',e);const status=$('catalogSyncStatus');if(status)status.textContent='Customer catalogue sync pending. Billing/Purchase/Stock remain fully offline.'}
-  finally{catalogPublishBusy=false}
+
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{
+      method:'POST',
+      headers:{
+        'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,
+        'Content-Type':'application/json',
+        'x-skm-catalog-key':SKM_CATALOG_WRITE_KEY
+      },
+      body:JSON.stringify({catalog:payload}),
+      signal:controller.signal
+    });
+
+    const text=await r.text();
+
+    if(!r.ok){
+      throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
+    }
+
+    if(status){
+      status.textContent=
+        'Customer catalogue updated: '+
+        payload.length+
+        ' products • '+
+        new Date().toLocaleTimeString('en-IN');
+    }
+
+  }catch(e){
+    console.warn('Customer catalogue sync failed:',e);
+
+    const msg=
+      e?.name==='AbortError'
+        ? 'Timeout after 12 seconds'
+        : (e?.message||String(e));
+
+    if(status){
+      status.textContent='Customer catalogue sync failed — '+msg;
+    }
+
+  }finally{
+    clearTimeout(timeout);
+    catalogPublishBusy=false;
+  }
 }
 window.publishCustomerCatalog=publishCustomerCatalog;
 function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
