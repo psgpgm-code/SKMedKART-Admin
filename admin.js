@@ -43,6 +43,7 @@ async function publishCustomerCatalog(force=false){
   }catch(e){console.warn('Customer catalogue sync skipped:',e);const status=$('catalogSyncStatus');if(status)status.textContent='Customer catalogue sync pending. Billing/Purchase/Stock remain fully offline.'}
   finally{catalogPublishBusy=false}
 }
+window.publishCustomerCatalog=publishCustomerCatalog;
 function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
 function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
