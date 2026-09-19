@@ -16,6 +16,105 @@ const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
+// SUPABASE PUBLIC CATALOGUE MIRROR — TEST BRANCH ONLY
+const SKM_SUPABASE_URL='https://uyobhzkcvfnrioppwkrv.supabase.co';
+const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
+const SKM_SUPABASE_PUBLISHABLE_KEY='sb_publishable_5zmngPN80O2CPgtNhGNhEQ_elEQpz9E';
+
+let catalogPublishTimer=null;
+let catalogPublishBusy=false;
+
+function SKMedKART_CATALOG_RPC_URL(){
+  return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog';
+}
+
+function catalogRows(){
+  const rows=new Map();
+
+  for(const p of (products||[])){
+    const id=String(p?.id||'').trim();
+    if(!id||!String(p?.name||'').trim())continue;
+
+    const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
+
+    rows.set(id,{
+      id,
+      name:String(p.name),
+      category:String(p.cat||p.category||'Human Medicines'),
+      price:Number(p.price||p.sellingPrice||0),
+      mrp:Number(p.mrp||p.price||0),
+      stock,
+      active:p.active!==false,
+      updated_at:new Date().toISOString()
+    });
+  }
+
+  return [...rows.values()];
+}
+
+async function publishCustomerCatalog(force=false){
+  if(catalogPublishBusy)return;
+  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+
+  catalogPublishBusy=true;
+
+  const status=$('catalogSyncStatus');
+  if(status)status.textContent='Updating Customer catalogue...';
+
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),12000);
+
+  try{
+    const payload=catalogRows();
+
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{
+      method:'POST',
+      headers:{
+        'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,
+        'Content-Type':'application/json',
+        'x-skm-catalog-key':SKM_CATALOG_WRITE_KEY
+      },
+      body:JSON.stringify({catalog:payload}),
+      signal:controller.signal
+    });
+
+    const responseText=await r.text();
+
+    if(!r.ok){
+      throw Error('HTTP '+r.status+': '+(responseText||'Supabase RPC failed'));
+    }
+
+    if(status){
+      status.textContent=
+        'Customer catalogue updated: '+
+        payload.length+
+        ' products • '+
+        new Date().toLocaleTimeString('en-IN');
+    }
+
+  }catch(e){
+    console.warn('Customer catalogue sync failed:',e);
+
+    const msg=e?.name==='AbortError'
+      ?'Timeout after 12 seconds'
+      :(e?.message||String(e));
+
+    if(status){
+      status.textContent='Customer catalogue sync failed — '+msg;
+    }
+
+  }finally{
+    clearTimeout(timeout);
+    catalogPublishBusy=false;
+  }
+}
+
+window.publishCustomerCatalog=publishCustomerCatalog;
+
+function scheduleCatalogPublish(){
+  clearTimeout(catalogPublishTimer);
+  catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900);
+}
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -71,7 +170,7 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>{localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
