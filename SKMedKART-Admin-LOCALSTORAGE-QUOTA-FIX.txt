@@ -1,0 +1,51 @@
+SKMedKART Admin – LocalStorage Quota Fix
+=============================================
+
+Problem fixed:
+"Could not save bill: Failed to execute 'setItem' on 'Storage': Setting the value of 'skm_pharmacy_v2_skm_local_pending_bills_v2' exceeded the quota."
+
+CAUSE:
+In local-first production mode, every saved bill was also copied into a second
+localStorage array called skm_local_pending_bills_v2. Since Firebase sync is
+disabled in this production build, that duplicate list could grow until the
+browser/PWA localStorage quota was exceeded.
+
+ONLY CHANGE REQUIRED:
+Replace this existing block in admin.js:
+
+const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
+function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
+function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
+
+WITH:
+
+const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
+// V5.9.57 QUOTA FIX: Billing is local-first and Firebase sync is disabled in production.
+// Pending bills were being duplicated into a second localStorage array and could exceed the browser quota.
+// The canonical local bill history is already stored in `bills`, so no pending copy is needed while offline.
+function getPendingBills(){
+ if(!configured){
+  try{localStorage.removeItem(K+PENDING_BILLS_KEY)}catch{}
+  return [];
+ }
+ return get(PENDING_BILLS_KEY,[])
+}
+function setPendingBills(v){
+ if(!configured)return;
+ try{set(PENDING_BILLS_KEY,v)}catch(e){console.warn('Pending bill cache skipped:',e)}
+}
+
+IMPORTANT:
+- Do NOT change billing calculations.
+- Do NOT change stock logic.
+- Do NOT change invoice numbering.
+- Do NOT change purchase entry.
+- Do NOT change reminders.
+- Do NOT change printing/PDF/WhatsApp.
+- Do NOT change any other feature.
+
+This is a targeted fix for the localStorage quota error only.
+
+After the updated admin.js is deployed, the old oversized pending-bill cache is
+automatically removed once the app starts because Firebase is disabled in this
+production mode.
