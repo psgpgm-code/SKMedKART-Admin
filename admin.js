@@ -1,4 +1,5 @@
-// V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// Production fix: canonical stock is derived from Purchase History and unique Bill IDs.
+// V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX
+// V5.9.75 BILL QUOTA ONLY: disable the redundant local pending-bill queue when Firebase is intentionally disabled.\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// Production fix: canonical stock is derived from Purchase History and unique Bill IDs.
 
 // V5.9.4 OFFLINE-FIRST: never clear existing local data.
 // A one-time Firebase migration copies existing cloud data into local storage.
@@ -253,8 +254,12 @@ async function migrateFirebaseOnce(){
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
 const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
-function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
-function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
+// Local-safe mode keeps the canonical bill ledger in IndexedDB. Firebase is disabled
+// in this production mode, so a second forever-growing pending-bill copy must never
+// be written to localStorage. That duplicate queue was the source of the
+// `skm_pharmacy_v2_bills exceeded the quota` failure after repeated billing.
+function getPendingBills(){return configured?get(PENDING_BILLS_KEY,[]):[]}
+function setPendingBills(v){if(configured)set(PENDING_BILLS_KEY,v)}
 function pendingSaleTotals(){
  const pb=getPendingBills(), prod=new Map(), batch=new Map();
  for(const row of pb){if(row.stockAlreadyReserved)continue;for(const it of (row.items||[])){prod.set(it.productId,(prod.get(it.productId)||0)+Number(it.qty||0));batch.set(it.batchId,(batch.get(it.batchId)||0)+Number(it.qty||0))}}
