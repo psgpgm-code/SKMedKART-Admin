@@ -16,6 +16,35 @@ const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
+// Supabase public catalogue mirror ONLY. Existing local billing/stock/purchase data stays unchanged.
+const SKM_SUPABASE_URL='https://uyobhzkcvfnrioppwkrv.supabase.co';
+const SKM_SUPABASE_PUBLISHABLE_KEY='sb_publishable_5zmngPN80O2CPgtNhGNhEQ_elEQpz9E';
+const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
+let catalogPublishTimer=null,catalogPublishBusy=false;
+function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
+function catalogRows(){
+  const rows=new Map();
+  for(const p of (products||[])){
+    const id=String(p?.id||'').trim(); if(!id||!String(p?.name||'').trim())continue;
+    const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
+    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,rx:p.rx===true,active:p.active!==false,updated_at:new Date().toISOString()});
+  }
+  return [...rows.values()];
+}
+async function publishCustomerCatalog(force=false){
+  if(catalogPublishBusy)return;
+  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+  catalogPublishBusy=true;
+  const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),12000);
+  try{
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:catalogRows()}),signal:controller.signal});
+    const text=await r.text(); if(!r.ok)throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
+    const status=$('catalogSyncStatus'); if(status)status.textContent='Customer catalogue updated: '+catalogRows().length+' products • '+new Date().toLocaleTimeString('en-IN');
+  }catch(e){console.warn('Customer catalogue sync failed:',e)}finally{clearTimeout(timeout);catalogPublishBusy=false}
+}
+function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
+window.publishCustomerCatalog=publishCustomerCatalog;
+
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -71,53 +100,17 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-// V5.9.75 ROOT-LEVEL QUOTA-SAFE STORAGE
-// Large pharmacy ledgers are stored in IndexedDB instead of localStorage.
-// This removes the browser localStorage ceiling from Bills, Purchases and Stock Movements.
-const LARGE_STORE_KEYS=new Set(['bills','purchases','stockMovements']);
-const LARGE_DB_NAME='SKMedKART_PharmacyData_V1';
-const LARGE_DB_VERSION=1;
-let largeDbPromise=null,largeStoreReady=false;
-const largeStoreCache=Object.create(null);
-function openLargeDb(){
- if(largeDbPromise)return largeDbPromise;
- largeDbPromise=new Promise((resolve,reject)=>{try{const req=indexedDB.open(LARGE_DB_NAME,LARGE_DB_VERSION);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections',{keyPath:'key'})};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB could not be opened.'))}catch(e){reject(e)}}).catch(e=>{largeDbPromise=null;throw e});
- return largeDbPromise;
-}
-function idbRead(key){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readonly'),req=tx.objectStore('collections').get(key);req.onsuccess=()=>resolve(req.result?.value);req.onerror=()=>reject(req.error||new Error('IndexedDB read failed.'))}))}
-function idbWrite(key,value){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put({key,value,savedAt:Date.now()});tx.oncomplete=()=>resolve(true);tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed.'));tx.onabort=()=>reject(tx.error||new Error('IndexedDB write aborted.'))}))}
-function mergeDurableRows(a,b){const out=new Map();for(const row of(Array.isArray(a)?a:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}for(const row of(Array.isArray(b)?b:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}return [...out.values()]}
-async function initLargeStorage(){
- if(largeStoreReady)return;
- await openLargeDb();
- for(const key of LARGE_STORE_KEYS){let disk=[],local=[];try{disk=await idbRead(key);if(!Array.isArray(disk))disk=[]}catch(e){}try{const raw=localStorage.getItem(K+key);if(raw)local=JSON.parse(raw)||[]}catch(e){}const merged=mergeDurableRows(disk,local);largeStoreCache[key]=merged;if(local.length||localStorage.getItem(K+key)!==null){await idbWrite(key,merged);try{localStorage.removeItem(K+key)}catch(e){}}else if(!disk.length)await idbWrite(key,[])}
- largeStoreReady=true;
-}
-
-// V5.9.76 DATA-PRESERVATION GUARD
-// The quota migration must never make an existing Bill History disappear.
-// If the new IndexedDB store is empty but the phone already has the verified
-// in-app snapshot, recover the bill ledger only. Never overwrite a non-empty
-// local bill ledger and never change stock/purchase/product logic.
-async function recoverBillsIfMissing(){
-  try{
-    const current=Array.isArray(largeStoreCache.bills)?largeStoreCache.bills:[];
-    if(current.length)return false;
-    const raw=await decodeVerifiedSnapshot();
-    const snapshot=raw?.collections?.bills;
-    if(!Array.isArray(snapshot)||!snapshot.length)return false;
-    const recovered=mergeDurableRows([],snapshot);
-    if(!recovered.length)return false;
-    largeStoreCache.bills=recovered;
-    await idbWrite('bills',recovered);
-    return true;
-  }catch(e){
-    console.warn('Bill history recovery skipped:',e);
-    return false;
-  }
-}
-function get(k,d){if(LARGE_STORE_KEYS.has(k))return Array.isArray(largeStoreCache[k])?largeStoreCache[k]:d;try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}}
-function set(k,v){if(LARGE_STORE_KEYS.has(k)){largeStoreCache[k]=Array.isArray(v)?v:v;return idbWrite(k,largeStoreCache[k])}return localStorage.setItem(K+k,JSON.stringify(v));}
+const LARGE_KEYS=new Set(['bills','purchases','stockMovements']);
+const LARGE_DB='SKMedKART_PharmacyData_V2';
+let largeDBPromise=null,largeReady=false;const largeCache=Object.create(null);
+function openLargeDB(){if(largeDBPromise)return largeDBPromise;largeDBPromise=new Promise((resolve,reject)=>{try{const r=indexedDB.open(LARGE_DB,1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections',{keyPath:'key'})};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error||Error('IndexedDB open failed'))}catch(e){reject(e)}});return largeDBPromise}
+function readLarge(k){return openLargeDB().then(db=>new Promise((res,rej)=>{const q=db.transaction('collections','readonly').objectStore('collections').get(k);q.onsuccess=()=>res(Array.isArray(q.result?.value)?q.result.value:null);q.onerror=()=>rej(q.error||Error('IndexedDB read failed'))}))}
+function writeLarge(k,v){return openLargeDB().then(db=>new Promise((res,rej)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put({key:k,value:Array.isArray(v)?v:[],savedAt:Date.now()});tx.oncomplete=()=>res(true);tx.onerror=()=>rej(tx.error||Error('IndexedDB write failed'));tx.onabort=()=>rej(tx.error||Error('IndexedDB write aborted'))}))}
+function mergeLarge(a,b){const m=new Map();for(const x of (Array.isArray(a)?a:[])){const id=String(x?.id||x?.invoiceNumber||'');m.set(id||('anonA'+m.size),x)}for(const x of (Array.isArray(b)?b:[])){const id=String(x?.id||x?.invoiceNumber||'');m.set(id||('anonB'+m.size),x)}return [...m.values()]}
+async function initLargeStorage(){if(largeReady)return;await openLargeDB();for(const k of LARGE_KEYS){let disk=null,local=null;try{disk=await readLarge(k)}catch(e){console.warn(k+' IndexedDB read failed',e)}try{const raw=localStorage.getItem(K+k);if(raw)local=JSON.parse(raw)||[]}catch(e){console.warn(k+' local read failed',e)}const merged=mergeLarge(disk||[],local||[]);largeCache[k]=merged;if((local||[]).length){try{await writeLarge(k,merged);localStorage.removeItem(K+k)}catch(e){console.warn(k+' migration failed; keeping local copy',e)}}else if(!disk)try{await writeLarge(k,merged)}catch(e){console.warn(k+' IndexedDB init failed',e)}}largeReady=true}
+async function recoverBillsIfEmpty(){if(Array.isArray(largeCache.bills)&&largeCache.bills.length)return;try{const data=await decodeVerifiedSnapshot();const snap=data?.collections?.bills;if(Array.isArray(snap)&&snap.length){largeCache.bills=mergeLarge([],snap);await writeLarge('bills',largeCache.bills)}}catch(e){console.warn('Bill recovery skipped',e)}}
+const get=(k,d)=>{if(LARGE_KEYS.has(k)&&largeReady)return Array.isArray(largeCache[k])?largeCache[k]:d;try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}};
+const set=(k,v)=>{if(LARGE_KEYS.has(k)){largeCache[k]=Array.isArray(v)?v:v;writeLarge(k,largeCache[k]).catch(e=>console.error('Storage write failed for '+k,e));return}localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -424,7 +417,7 @@ function decodeVerifiedSnapshot(){
 async function migrateVerifiedSnapshotOnce(){
   if(configured||localStorage.getItem('skm_verified_snapshot_migrated_v2')==='yes')return false;
   const data=await decodeVerifiedSnapshot(),c=data?.collections||{};
-  const mergeBaseline=(current,baseline)=>{const cur=Array.isArray(current)?current:[],base=Array.isArray(baseline)?baseline:[];const key=x=>String(x?.id||x?.invoiceNumber||('anon:'+JSON.stringify(x)));const map=new Map();for(const x of base)map.set(key(x),x);for(const x of cur)map.set(key(x),x);return [...map.values()]};
+  const mergeBaseline=(current,baseline)=>{const cur=Array.isArray(current)?current:[],base=Array.isArray(baseline)?baseline:[];const map=new Map();for(const x of base){const id=String(x?.id||'');if(id)map.set(id,x)}for(const x of cur){const id=String(x?.id||'');if(id&&!map.has(id))map.set(id,x)}return [...map.values()]};
   products=mergeBaseline(get('products',[]),c.products);
   purchases=mergeBaseline(get('purchases',[]),c.purchases).filter(x=>x?.recovered!==true);
   bills=mergeBaseline(get('bills',[]),c.bills);
@@ -458,7 +451,7 @@ async function migrateVerifiedSnapshotOnce(){
 
 async function loadAll(force=false){
  await initLargeStorage();
- await recoverBillsIfMissing();
+ await recoverBillsIfEmpty();
  recoverMissingLocalReminders();
  if(!configured){
    try{await migrateVerifiedSnapshotOnce()}catch(e){console.error('Verified snapshot migration failed:',e)}
@@ -708,8 +701,8 @@ window.saveBill=async()=>{
    for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}
   }
   // Persist the complete local bill transaction before any UI refresh.
-  bills.unshift(bill);await set('bills',bills);set('batches',batches);set('products',products);
-  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));await set('stockMovements',sm);
+  bills.unshift(bill);await writeLarge('bills',bills);largeCache.bills=bills;set('batches',batches);set('products',products);
+  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));await writeLarge('stockMovements',sm);largeCache.stockMovements=sm;
   if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
   setPendingBills([...getPendingBills(),bill]);
   // Clear the cart only after all local writes have succeeded.
