@@ -1,4 +1,5 @@
-// V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// Production fix: canonical stock is derived from Purchase History and unique Bill IDs.
+// V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX
+// V5.9.76 BILL QUOTA + LEGACY DATA RECOVERY: preserve older local ledgers while removing the redundant pending-bill queue.\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// Production fix: canonical stock is derived from Purchase History and unique Bill IDs.
 
 // V5.9.4 OFFLINE-FIRST: never clear existing local data.
 // A one-time Firebase migration copies existing cloud data into local storage.
@@ -16,105 +17,35 @@ const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
-// SUPABASE PUBLIC CATALOGUE MIRROR — TEST BRANCH ONLY
+// Supabase public catalogue mirror ONLY. Existing local billing/stock/purchase data stays unchanged.
 const SKM_SUPABASE_URL='https://uyobhzkcvfnrioppwkrv.supabase.co';
-const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
 const SKM_SUPABASE_PUBLISHABLE_KEY='sb_publishable_5zmngPN80O2CPgtNhGNhEQ_elEQpz9E';
-
-let catalogPublishTimer=null;
-let catalogPublishBusy=false;
-
-function SKMedKART_CATALOG_RPC_URL(){
-  return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog';
-}
-
+const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
+let catalogPublishTimer=null,catalogPublishBusy=false;
+function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
 function catalogRows(){
   const rows=new Map();
-
   for(const p of (products||[])){
-    const id=String(p?.id||'').trim();
-    if(!id||!String(p?.name||'').trim())continue;
-
+    const id=String(p?.id||'').trim(); if(!id||!String(p?.name||'').trim())continue;
     const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
-
-    rows.set(id,{
-      id,
-      name:String(p.name),
-      category:String(p.cat||p.category||'Human Medicines'),
-      price:Number(p.price||p.sellingPrice||0),
-      mrp:Number(p.mrp||p.price||0),
-      stock,
-      active:p.active!==false,
-      updated_at:new Date().toISOString()
-    });
+    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,rx:p.rx===true,active:p.active!==false,updated_at:new Date().toISOString()});
   }
-
   return [...rows.values()];
 }
-
 async function publishCustomerCatalog(force=false){
   if(catalogPublishBusy)return;
   if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
-
   catalogPublishBusy=true;
-
-  const status=$('catalogSyncStatus');
-  if(status)status.textContent='Updating Customer catalogue...';
-
-  const controller=new AbortController();
-  const timeout=setTimeout(()=>controller.abort(),12000);
-
+  const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),12000);
   try{
-    const payload=catalogRows();
-
-    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{
-      method:'POST',
-      headers:{
-        'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,
-        'Content-Type':'application/json',
-        'x-skm-catalog-key':SKM_CATALOG_WRITE_KEY
-      },
-      body:JSON.stringify({catalog:payload}),
-      signal:controller.signal
-    });
-
-    const responseText=await r.text();
-
-    if(!r.ok){
-      throw Error('HTTP '+r.status+': '+(responseText||'Supabase RPC failed'));
-    }
-
-    if(status){
-      status.textContent=
-        'Customer catalogue updated: '+
-        payload.length+
-        ' products • '+
-        new Date().toLocaleTimeString('en-IN');
-    }
-
-  }catch(e){
-    console.warn('Customer catalogue sync failed:',e);
-
-    const msg=e?.name==='AbortError'
-      ?'Timeout after 12 seconds'
-      :(e?.message||String(e));
-
-    if(status){
-      status.textContent='Customer catalogue sync failed — '+msg;
-    }
-
-  }finally{
-    clearTimeout(timeout);
-    catalogPublishBusy=false;
-  }
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:catalogRows()}),signal:controller.signal});
+    const text=await r.text(); if(!r.ok)throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
+    const status=$('catalogSyncStatus'); if(status)status.textContent='Customer catalogue updated: '+catalogRows().length+' products • '+new Date().toLocaleTimeString('en-IN');
+  }catch(e){console.warn('Customer catalogue sync failed:',e)}finally{clearTimeout(timeout);catalogPublishBusy=false}
 }
-
+function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
 window.publishCustomerCatalog=publishCustomerCatalog;
 
-function scheduleCatalogPublish(){
-  clearTimeout(catalogPublishTimer);
-  catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900);
-}
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -170,7 +101,59 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>{localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
+const LARGE_KEYS=new Set(['bills','purchases','stockMovements']);
+const LARGE_DB='SKMedKART_PharmacyData_V2';
+let largeDBPromise=null,largeReady=false;const largeCache=Object.create(null);
+function openLargeDB(){if(largeDBPromise)return largeDBPromise;largeDBPromise=new Promise((resolve,reject)=>{try{const r=indexedDB.open(LARGE_DB,1);r.onupgradeneeded=()=>{const db=r.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections',{keyPath:'key'})};r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error||Error('IndexedDB open failed'))}catch(e){reject(e)}});return largeDBPromise}
+function readLarge(k){return openLargeDB().then(db=>new Promise((res,rej)=>{const q=db.transaction('collections','readonly').objectStore('collections').get(k);q.onsuccess=()=>res(Array.isArray(q.result?.value)?q.result.value:null);q.onerror=()=>rej(q.error||Error('IndexedDB read failed'))}))}
+function writeLarge(k,v){return openLargeDB().then(db=>new Promise((res,rej)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put({key:k,value:Array.isArray(v)?v:[],savedAt:Date.now()});tx.oncomplete=()=>res(true);tx.onerror=()=>rej(tx.error||Error('IndexedDB write failed'));tx.onabort=()=>rej(tx.error||Error('IndexedDB write aborted'))}))}
+function mergeLarge(a,b){const m=new Map();for(const x of (Array.isArray(a)?a:[])){const id=String(x?.id||x?.invoiceNumber||'');m.set(id||('anonA'+m.size),x)}for(const x of (Array.isArray(b)?b:[])){const id=String(x?.id||x?.invoiceNumber||'');m.set(id||('anonB'+m.size),x)}return [...m.values()]}
+async function initLargeStorage(){if(largeReady)return;await openLargeDB();for(const k of LARGE_KEYS){let disk=null,local=null,pending=[];try{disk=await readLarge(k)}catch(e){console.warn(k+' IndexedDB read failed',e)}try{const raw=localStorage.getItem(K+k);if(raw)local=JSON.parse(raw)||[]}catch(e){console.warn(k+' local read failed',e)}if(k==='bills'&&!configured){try{const raw=localStorage.getItem(PENDING_BILLS_KEY);if(raw)pending=JSON.parse(raw)||[]}catch(e){console.warn('pending bills recovery read failed',e)}}let merged=mergeLarge(disk||[],local||[]);if(k==='bills'&&pending.length)merged=mergeLarge(merged,pending);largeCache[k]=merged;if((local||[]).length||pending.length){try{await writeLarge(k,merged);if((local||[]).length)localStorage.removeItem(K+k);if(pending.length)localStorage.removeItem(PENDING_BILLS_KEY)}catch(e){console.warn(k+' migration failed; keeping local copy',e)}}else if(!disk)try{await writeLarge(k,merged)}catch(e){console.warn(k+' IndexedDB init failed',e)}}largeReady=true}
+const LEGACY_LARGE_DB='SKMedKART_PharmacyData_V1';
+async function readLegacyV1Collection(key){
+  try{
+    if(!window.indexedDB)return [];
+    const db=await new Promise((resolve,reject)=>{
+      const req=indexedDB.open(LEGACY_LARGE_DB,1);
+      req.onupgradeneeded=()=>{
+        try{if(!req.result.objectStoreNames.contains('collections'))req.result.createObjectStore('collections',{keyPath:'key'})}catch(e){}
+      };
+      req.onsuccess=()=>resolve(req.result);
+      req.onerror=()=>reject(req.error||Error('Legacy IndexedDB open failed'));
+    });
+    if(!db.objectStoreNames.contains('collections')){db.close();return []}
+    const row=await new Promise((resolve,reject)=>{
+      const q=db.transaction('collections','readonly').objectStore('collections').get(key);
+      q.onsuccess=()=>resolve(q.result);
+      q.onerror=()=>reject(q.error||Error('Legacy IndexedDB read failed'));
+    });
+    db.close();
+    return Array.isArray(row?.value)?row.value:[];
+  }catch(e){console.warn('Legacy V1 migration read skipped for '+key,e);return []}
+}
+async function migrateLegacyV1IntoV2(){
+  if(localStorage.getItem('skm_legacy_v1_migrated_v2')==='yes')return false;
+  let changed=false;
+  try{
+    for(const key of LARGE_KEYS){
+      const legacy=await readLegacyV1Collection(key);
+      if(!legacy.length)continue;
+      const current=Array.isArray(largeCache[key])?largeCache[key]:[];
+      const merged=mergeLarge(legacy,current); // current V2 rows win; legacy fills missing bills/purchases/movements.
+      if(merged.length>current.length){
+        largeCache[key]=merged;
+        await writeLarge(key,merged);
+        changed=true;
+      }
+    }
+  }catch(e){console.warn('Legacy V1 → V2 migration skipped:',e)}
+  try{localStorage.setItem('skm_legacy_v1_migrated_v2','yes')}catch(e){}
+  return changed;
+}
+
+async function recoverBillsIfEmpty(){if(Array.isArray(largeCache.bills)&&largeCache.bills.length)return;try{const data=await decodeVerifiedSnapshot();const snap=data?.collections?.bills;if(Array.isArray(snap)&&snap.length){largeCache.bills=mergeLarge([],snap);await writeLarge('bills',largeCache.bills)}}catch(e){console.warn('Bill recovery skipped',e)}}
+const get=(k,d)=>{if(LARGE_KEYS.has(k)&&largeReady)return Array.isArray(largeCache[k])?largeCache[k]:d;try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}};
+const set=(k,v)=>{if(LARGE_KEYS.has(k)){largeCache[k]=Array.isArray(v)?v:v;writeLarge(k,largeCache[k]).catch(e=>console.error('Storage write failed for '+k,e));return}localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -313,8 +296,11 @@ async function migrateFirebaseOnce(){
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
 const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
-function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
-function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
+// V5.9.75 FINAL: old pending bills are recovered into IndexedDB once during startup.
+// Local-safe mode then stops creating the duplicate localStorage queue.
+function getPendingBills(){return configured?get(PENDING_BILLS_KEY,[]):[]}
+function setPendingBills(v){if(configured)set(PENDING_BILLS_KEY,v)}
+
 function pendingSaleTotals(){
  const pb=getPendingBills(), prod=new Map(), batch=new Map();
  for(const row of pb){if(row.stockAlreadyReserved)continue;for(const it of (row.items||[])){prod.set(it.productId,(prod.get(it.productId)||0)+Number(it.qty||0));batch.set(it.batchId,(batch.get(it.batchId)||0)+Number(it.qty||0))}}
@@ -510,6 +496,9 @@ async function migrateVerifiedSnapshotOnce(){
 }
 
 async function loadAll(force=false){
+ await initLargeStorage();
+ await migrateLegacyV1IntoV2();
+ await recoverBillsIfEmpty();
  recoverMissingLocalReminders();
  if(!configured){
    try{await migrateVerifiedSnapshotOnce()}catch(e){console.error('Verified snapshot migration failed:',e)}
@@ -759,8 +748,8 @@ window.saveBill=async()=>{
    for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}
   }
   // Persist the complete local bill transaction before any UI refresh.
-  bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
-  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
+  bills.unshift(bill);await writeLarge('bills',bills);largeCache.bills=bills;set('batches',batches);set('products',products);
+  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));await writeLarge('stockMovements',sm);largeCache.stockMovements=sm;
   if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
   setPendingBills([...getPendingBills(),bill]);
   // Clear the cart only after all local writes have succeeded.

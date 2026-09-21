@@ -1,4 +1,4 @@
-const CACHE='skmedkart-admin-v5.9.74';
+const CACHE='skmedkart-admin-v5.9.75-quota-only';
 const ASSETS=['./','./index.html','./admin.js','./manifest.webmanifest','./invoice-top-logo.png','./invoice-footer-logo.jpg','./pharmacist_signature.jpg'];
 self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(async c=>{for(const a of ASSETS){try{const r=await fetch(a,{cache:'no-store'});if(r.ok)await c.put(a,r.clone())}catch{}}await self.skipWaiting()})));
 self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('skmedkart-admin-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
