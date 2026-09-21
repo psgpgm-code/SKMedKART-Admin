@@ -71,7 +71,30 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-const get=(k,d)=>{try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}},set=(k,v)=>localStorage.setItem(K+k,JSON.stringify(v));
+// V5.9.75 ROOT-LEVEL QUOTA-SAFE STORAGE
+// Large pharmacy ledgers are stored in IndexedDB instead of localStorage.
+// This removes the browser localStorage ceiling from Bills, Purchases and Stock Movements.
+const LARGE_STORE_KEYS=new Set(['bills','purchases','stockMovements']);
+const LARGE_DB_NAME='SKMedKART_PharmacyData_V1';
+const LARGE_DB_VERSION=1;
+let largeDbPromise=null,largeStoreReady=false;
+const largeStoreCache=Object.create(null);
+function openLargeDb(){
+ if(largeDbPromise)return largeDbPromise;
+ largeDbPromise=new Promise((resolve,reject)=>{try{const req=indexedDB.open(LARGE_DB_NAME,LARGE_DB_VERSION);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections',{keyPath:'key'})};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB could not be opened.'))}catch(e){reject(e)}}).catch(e=>{largeDbPromise=null;throw e});
+ return largeDbPromise;
+}
+function idbRead(key){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readonly'),req=tx.objectStore('collections').get(key);req.onsuccess=()=>resolve(req.result?.value);req.onerror=()=>reject(req.error||new Error('IndexedDB read failed.'))}))}
+function idbWrite(key,value){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put({key,value,savedAt:Date.now()});tx.oncomplete=()=>resolve(true);tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed.'));tx.onabort=()=>reject(tx.error||new Error('IndexedDB write aborted.'))}))}
+function mergeDurableRows(a,b){const out=new Map();for(const row of(Array.isArray(a)?a:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}for(const row of(Array.isArray(b)?b:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}return [...out.values()]}
+async function initLargeStorage(){
+ if(largeStoreReady)return;
+ await openLargeDb();
+ for(const key of LARGE_STORE_KEYS){let disk=[],local=[];try{disk=await idbRead(key);if(!Array.isArray(disk))disk=[]}catch(e){}try{const raw=localStorage.getItem(K+key);if(raw)local=JSON.parse(raw)||[]}catch(e){}const merged=mergeDurableRows(disk,local);largeStoreCache[key]=merged;if(local.length||localStorage.getItem(K+key)!==null){await idbWrite(key,merged);try{localStorage.removeItem(K+key)}catch(e){}}else if(!disk.length)await idbWrite(key,[])}
+ largeStoreReady=true;
+}
+function get(k,d){if(LARGE_STORE_KEYS.has(k))return Array.isArray(largeStoreCache[k])?largeStoreCache[k]:d;try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}}
+function set(k,v){if(LARGE_STORE_KEYS.has(k)){largeStoreCache[k]=Array.isArray(v)?v:v;return idbWrite(k,largeStoreCache[k])}return localStorage.setItem(K+k,JSON.stringify(v));}
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -214,14 +237,8 @@ async function migrateFirebaseOnce(){
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
 const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
-// QUOTA FIX: Offline billing must not keep a second full copy of every bill.
-// The bill itself is already stored in skm_pharmacy_v2_bills. Keeping the same
-// full bill again in a pending-sync array was doubling localStorage usage and
-// eventually caused: Storage.setItem(...) exceeded the quota.
-function getPendingBills(){return configured?get(PENDING_BILLS_KEY,[]):[]}
-function setPendingBills(v){if(configured)set(PENDING_BILLS_KEY,v);else{try{localStorage.removeItem(PENDING_BILLS_KEY)}catch(e){}}}
-// Clean up the duplicate pending-bill store immediately in offline mode.
-if(!configured){try{localStorage.removeItem(PENDING_BILLS_KEY)}catch(e){}}
+function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
+function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
 function pendingSaleTotals(){
  const pb=getPendingBills(), prod=new Map(), batch=new Map();
  for(const row of pb){if(row.stockAlreadyReserved)continue;for(const it of (row.items||[])){prod.set(it.productId,(prod.get(it.productId)||0)+Number(it.qty||0));batch.set(it.batchId,(batch.get(it.batchId)||0)+Number(it.qty||0))}}
@@ -417,6 +434,7 @@ async function migrateVerifiedSnapshotOnce(){
 }
 
 async function loadAll(force=false){
+ await initLargeStorage();
  recoverMissingLocalReminders();
  if(!configured){
    try{await migrateVerifiedSnapshotOnce()}catch(e){console.error('Verified snapshot migration failed:',e)}
@@ -666,11 +684,10 @@ window.saveBill=async()=>{
    for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}
   }
   // Persist the complete local bill transaction before any UI refresh.
-  bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
-  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
+  bills.unshift(bill);await set('bills',bills);set('batches',batches);set('products',products);
+  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));await set('stockMovements',sm);
   if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
-  // Only online-enabled builds need the duplicate pending-sync queue.
-  if(configured) setPendingBills([...getPendingBills(),bill]);
+  setPendingBills([...getPendingBills(),bill]);
   // Clear the cart only after all local writes have succeeded.
   billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>{if($(id))$(id).value=''});if($('bDiscount'))$('bDiscount').value=0;if($('bGst'))$('bGst').value=0;window.setDiscountType?.('flat');
   renderAll();
