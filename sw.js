@@ -1,5 +1,39 @@
-const CACHE='skmedkart-admin-v5.9.74';
-const ASSETS=['./','./index.html','./admin.js','./manifest.webmanifest','./invoice-top-logo.png','./invoice-footer-logo.jpg','./pharmacist_signature.jpg'];
-self.addEventListener('install',e=>e.waitUntil(caches.open(CACHE).then(async c=>{for(const a of ASSETS){try{const r=await fetch(a,{cache:'no-store'});if(r.ok)await c.put(a,r.clone())}catch{}}await self.skipWaiting()})));
-self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith('skmedkart-admin-')&&k!==CACHE).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
-self.addEventListener('fetch',e=>{if(e.request.method!=='GET')return;const u=new URL(e.request.url);if(u.origin===self.location.origin&&u.pathname.endsWith('/admin.js')){e.respondWith(fetch(new Request(e.request,{cache:'no-store'})).then(r=>{if(r&&r.ok)caches.open(CACHE).then(c=>c.put('./admin.js',r.clone())).catch(()=>{});return r}).catch(()=>caches.match('./admin.js')));return}e.respondWith(fetch(e.request).then(r=>{if(r&&r.ok)caches.open(CACHE).then(c=>c.put(e.request,r.clone())).catch(()=>{});return r}).catch(()=>caches.match(e.request))) });
+// SKMedKART Admin — cache refresh only
+// This service worker does not change Billing, Stock, Purchase or Catalogue logic.
+// It always fetches the current admin.js so an older cached build cannot keep the quota bug.
+const CACHE='skmedkart-admin-v5.9.76-quota-only';
+const ASSETS=['./','./index.html','./manifest.webmanifest'];
+self.addEventListener('install',event=>event.waitUntil(
+  caches.open(CACHE).then(async cache=>{
+    for(const asset of ASSETS){
+      try{const r=await fetch(asset,{cache:'no-store'});if(r.ok)await cache.put(asset,r.clone())}catch(e){}
+    }
+    await self.skipWaiting();
+  })
+));
+self.addEventListener('activate',event=>event.waitUntil(
+  caches.keys().then(keys=>Promise.all(
+    keys.filter(k=>k.startsWith('skmedkart-admin-')&&k!==CACHE).map(k=>caches.delete(k))
+  )).then(()=>self.clients.claim())
+));
+self.addEventListener('fetch',event=>{
+  if(event.request.method!=='GET')return;
+  const url=new URL(event.request.url);
+  if(url.origin===self.location.origin && url.pathname.endsWith('/admin.js')){
+    event.respondWith(
+      fetch(new Request(event.request,{cache:'no-store'}))
+        .then(response=>{
+          if(response.ok)caches.open(CACHE).then(cache=>cache.put(event.request,response.clone())).catch(()=>{});
+          return response;
+        })
+        .catch(()=>caches.match(event.request))
+    );
+    return;
+  }
+  event.respondWith(
+    fetch(event.request).then(response=>{
+      if(response.ok)caches.open(CACHE).then(cache=>cache.put(event.request,response.clone())).catch(()=>{});
+      return response;
+    }).catch(()=>caches.match(event.request))
+  );
+});

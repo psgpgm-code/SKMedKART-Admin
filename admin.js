@@ -16,6 +16,35 @@ const externalCfg=window.SKMED_FIREBASE_CONFIG||{};
 const cfg=(externalCfg&&externalCfg.projectId&&!String(externalCfg.projectId).startsWith('PASTE_'))?externalCfg:BUILTIN_FIREBASE_CONFIG;
 const admins=window.SKMED_ADMIN_EMAILS||[];
 const configured=false; // V5.9.52 FINAL: local-first production mode. Firebase is intentionally disabled for Billing, Purchase, Stock and Sync. No quota/network dependency.
+// Supabase public catalogue mirror ONLY. Existing local billing/stock/purchase data stays unchanged.
+const SKM_SUPABASE_URL='https://uyobhzkcvfnrioppwkrv.supabase.co';
+const SKM_SUPABASE_PUBLISHABLE_KEY='sb_publishable_5zmngPN80O2CPgtNhGNhEQ_elEQpz9E';
+const SKM_CATALOG_WRITE_KEY='kzYrQ9lW21uAb5gbKs6wHSnGpiDGncS1HF_gRn4ukBQ';
+let catalogPublishTimer=null,catalogPublishBusy=false;
+function SKMedKART_CATALOG_RPC_URL(){return SKM_SUPABASE_URL+'/rest/v1/rpc/replace_public_catalog'}
+function catalogRows(){
+  const rows=new Map();
+  for(const p of (products||[])){
+    const id=String(p?.id||'').trim(); if(!id||!String(p?.name||'').trim())continue;
+    const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
+    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,rx:p.rx===true,active:p.active!==false,updated_at:new Date().toISOString()});
+  }
+  return [...rows.values()];
+}
+async function publishCustomerCatalog(force=false){
+  if(catalogPublishBusy)return;
+  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+  catalogPublishBusy=true;
+  const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),12000);
+  try{
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:catalogRows()}),signal:controller.signal});
+    const text=await r.text(); if(!r.ok)throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
+    const status=$('catalogSyncStatus'); if(status)status.textContent='Customer catalogue updated: '+catalogRows().length+' products • '+new Date().toLocaleTimeString('en-IN');
+  }catch(e){console.warn('Customer catalogue sync failed:',e)}finally{clearTimeout(timeout);catalogPublishBusy=false}
+}
+function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
+window.publishCustomerCatalog=publishCustomerCatalog;
+
 let db=null,auth=null,currentOrders=[],products=[],purchases=[],batches=[],bills=[],customers=[],reminders=[],suppliers=[],liveStarted=false,billCart=[],sourceOrderId='',discountType='flat';
 let scheduleFilter='H';
 let editingPurchaseId='';
@@ -71,30 +100,42 @@ async function ensureFirebase(){
 
 
 const $=id=>document.getElementById(id),esc=s=>String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]));
-// V5.9.75 ROOT-LEVEL QUOTA-SAFE STORAGE
-// Large pharmacy ledgers are stored in IndexedDB instead of localStorage.
-// This removes the browser localStorage ceiling from Bills, Purchases and Stock Movements.
-const LARGE_STORE_KEYS=new Set(['bills','purchases','stockMovements']);
-const LARGE_DB_NAME='SKMedKART_PharmacyData_V1';
-const LARGE_DB_VERSION=1;
-let largeDbPromise=null,largeStoreReady=false;
-const largeStoreCache=Object.create(null);
-function openLargeDb(){
- if(largeDbPromise)return largeDbPromise;
- largeDbPromise=new Promise((resolve,reject)=>{try{const req=indexedDB.open(LARGE_DB_NAME,LARGE_DB_VERSION);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections',{keyPath:'key'})};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||new Error('IndexedDB could not be opened.'))}catch(e){reject(e)}}).catch(e=>{largeDbPromise=null;throw e});
- return largeDbPromise;
+
+// V5.9.75: large local datasets use IndexedDB. This is a storage-layer fix
+// only; existing billing, stock, purchase, catalogue and UI logic is preserved.
+const LARGE_LOCAL_COLLECTIONS=new Set(['products','batches','purchases','bills','stockMovements']);
+const LARGE_LOCAL_DB_NAME='skmedkart_local_store_v1';
+const LARGE_LOCAL_DB_VERSION=1;
+let largeLocalDbPromise=null,largeLocalReady=false;
+const largeLocalCache=new Map();
+let largeLocalWriteChain=Promise.resolve();
+function openLargeLocalDb(){
+ if(largeLocalDbPromise)return largeLocalDbPromise;
+ largeLocalDbPromise=new Promise((resolve,reject)=>{try{if(!window.indexedDB)throw Error('IndexedDB is not supported on this device.');const req=indexedDB.open(LARGE_LOCAL_DB_NAME,LARGE_LOCAL_DB_VERSION);req.onupgradeneeded=()=>{const db=req.result;if(!db.objectStoreNames.contains('collections'))db.createObjectStore('collections')};req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||Error('Could not open local storage database.'))}catch(e){reject(e)}});
+ return largeLocalDbPromise;
 }
-function idbRead(key){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readonly'),req=tx.objectStore('collections').get(key);req.onsuccess=()=>resolve(req.result?.value);req.onerror=()=>reject(req.error||new Error('IndexedDB read failed.'))}))}
-function idbWrite(key,value){return openLargeDb().then(db=>new Promise((resolve,reject)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put({key,value,savedAt:Date.now()});tx.oncomplete=()=>resolve(true);tx.onerror=()=>reject(tx.error||new Error('IndexedDB write failed.'));tx.onabort=()=>reject(tx.error||new Error('IndexedDB write aborted.'))}))}
-function mergeDurableRows(a,b){const out=new Map();for(const row of(Array.isArray(a)?a:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}for(const row of(Array.isArray(b)?b:[])){const id=String(row?.id||row?.invoiceNumber||'');if(id)out.set(id,row);else out.set('anon:'+out.size,row)}return [...out.values()]}
-async function initLargeStorage(){
- if(largeStoreReady)return;
- await openLargeDb();
- for(const key of LARGE_STORE_KEYS){let disk=[],local=[];try{disk=await idbRead(key);if(!Array.isArray(disk))disk=[]}catch(e){}try{const raw=localStorage.getItem(K+key);if(raw)local=JSON.parse(raw)||[]}catch(e){}const merged=mergeDurableRows(disk,local);largeStoreCache[key]=merged;if(local.length||localStorage.getItem(K+key)!==null){await idbWrite(key,merged);try{localStorage.removeItem(K+key)}catch(e){}}else if(!disk.length)await idbWrite(key,[])}
- largeStoreReady=true;
+function idbReadCollection(db,key){return new Promise((resolve,reject)=>{const tx=db.transaction('collections','readonly'),req=tx.objectStore('collections').get(key);req.onsuccess=()=>resolve(req.result);req.onerror=()=>reject(req.error||Error('IndexedDB read failed.'))})}
+function idbWriteCollection(db,key,value){return new Promise((resolve,reject)=>{const tx=db.transaction('collections','readwrite');tx.objectStore('collections').put(value,key);tx.oncomplete=()=>resolve();tx.onerror=()=>reject(tx.error||Error('IndexedDB write failed.'));tx.onabort=()=>reject(tx.error||Error('IndexedDB write aborted.'))})}
+async function initLargeLocalStorage(){
+ if(largeLocalReady)return;
+ const db=await openLargeLocalDb();
+ for(const key of LARGE_LOCAL_COLLECTIONS){
+  let stored,legacy=null;
+  try{stored=await idbReadCollection(db,key)}catch(e){}
+  try{const raw=localStorage.getItem(K+key);if(raw)legacy=JSON.parse(raw)}catch(e){}
+  if(stored!==undefined&&stored!==null)largeLocalCache.set(key,Array.isArray(stored)?stored:[]);
+  else{largeLocalCache.set(key,Array.isArray(legacy)?legacy:[]);await idbWriteCollection(db,key,largeLocalCache.get(key));}
+ }
+ // Previous builds duplicated each local bill in the pending queue. Merge any
+ // missing rows first, then remove only that redundant queue copy.
+ try{const raw=localStorage.getItem(K+'skm_local_pending_bills_v2');if(raw){const pending=JSON.parse(raw);if(Array.isArray(pending)&&pending.length){const bills=largeLocalCache.get('bills')||[];const ids=new Set(bills.map(x=>String(x?.id||x?.invoiceNumber||'')));let changed=false;for(const row of pending){const id=String(row?.id||row?.invoiceNumber||'');if(id&&!ids.has(id)){bills.push(row);ids.add(id);changed=true}}if(changed){largeLocalCache.set('bills',bills);await idbWriteCollection(db,'bills',bills)}}localStorage.removeItem(K+'skm_local_pending_bills_v2')}}catch(e){console.warn('Pending bill migration skipped:',e)}
+ for(const key of LARGE_LOCAL_COLLECTIONS){try{localStorage.removeItem(K+key)}catch(e){}}
+ largeLocalReady=true;
 }
-function get(k,d){if(LARGE_STORE_KEYS.has(k))return Array.isArray(largeStoreCache[k])?largeStoreCache[k]:d;try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}}
-function set(k,v){if(LARGE_STORE_KEYS.has(k)){largeStoreCache[k]=Array.isArray(v)?v:v;return idbWrite(k,largeStoreCache[k])}return localStorage.setItem(K+k,JSON.stringify(v));}
+function queueLargeLocalWrite(key,value){const write=largeLocalWriteChain.catch(()=>{}).then(async()=>{const db=await openLargeLocalDb();await idbWriteCollection(db,key,value)});largeLocalWriteChain=write;return write}
+function flushLargeLocalWrites(){return largeLocalWriteChain}
+const get=(k,d)=>{if(LARGE_LOCAL_COLLECTIONS.has(k)){if(largeLocalCache.has(k))return largeLocalCache.get(k);try{const raw=localStorage.getItem(K+k);return raw?JSON.parse(raw):d}catch{return d}}try{return JSON.parse(localStorage.getItem(K+k)||JSON.stringify(d))}catch{return d}};
+const set=(k,v)=>{if(LARGE_LOCAL_COLLECTIONS.has(k)){const safe=Array.isArray(v)?v:[];largeLocalCache.set(k,safe);queueLargeLocalWrite(k,safe)}else localStorage.setItem(K+k,JSON.stringify(v));if(k==='products'||k==='batches')scheduleCatalogPublish()};
 const REMINDER_DURABLE_KEY='skm_customer_reminders_durable_v2';
 function persistReminders(rows){
   const safe=Array.isArray(rows)?rows:[];
@@ -434,7 +475,7 @@ async function migrateVerifiedSnapshotOnce(){
 }
 
 async function loadAll(force=false){
- await initLargeStorage();
+ await initLargeLocalStorage();
  recoverMissingLocalReminders();
  if(!configured){
    try{await migrateVerifiedSnapshotOnce()}catch(e){console.error('Verified snapshot migration failed:',e)}
@@ -684,10 +725,11 @@ window.saveBill=async()=>{
    for(const pid of touched){const p=products.find(x=>String(x.id)===pid);if(p)p.stock=batches.filter(x=>String(x.productId)===pid).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);}
   }
   // Persist the complete local bill transaction before any UI refresh.
-  bills.unshift(bill);await set('bills',bills);set('batches',batches);set('products',products);
-  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));await set('stockMovements',sm);
+  bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
+  const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
+  await flushLargeLocalWrites();
   if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
-  setPendingBills([...getPendingBills(),bill]);
+  if(configured){setPendingBills([...getPendingBills(),bill]);}else{try{localStorage.removeItem(K+PENDING_BILLS_KEY)}catch{}}
   // Clear the cart only after all local writes have succeeded.
   billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>{if($(id))$(id).value=''});if($('bDiscount'))$('bDiscount').value=0;if($('bGst'))$('bGst').value=0;window.setDiscountType?.('flat');
   renderAll();
