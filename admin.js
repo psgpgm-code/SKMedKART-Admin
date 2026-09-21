@@ -214,8 +214,14 @@ async function migrateFirebaseOnce(){
 window.migrateFirebaseOnce=migrateFirebaseOnce;
 
 const PENDING_BILLS_KEY='skm_local_pending_bills_v2';
-function getPendingBills(){return get(PENDING_BILLS_KEY,[])}
-function setPendingBills(v){set(PENDING_BILLS_KEY,v)}
+// QUOTA FIX: Offline billing must not keep a second full copy of every bill.
+// The bill itself is already stored in skm_pharmacy_v2_bills. Keeping the same
+// full bill again in a pending-sync array was doubling localStorage usage and
+// eventually caused: Storage.setItem(...) exceeded the quota.
+function getPendingBills(){return configured?get(PENDING_BILLS_KEY,[]):[]}
+function setPendingBills(v){if(configured)set(PENDING_BILLS_KEY,v);else{try{localStorage.removeItem(PENDING_BILLS_KEY)}catch(e){}}}
+// Clean up the duplicate pending-bill store immediately in offline mode.
+if(!configured){try{localStorage.removeItem(PENDING_BILLS_KEY)}catch(e){}}
 function pendingSaleTotals(){
  const pb=getPendingBills(), prod=new Map(), batch=new Map();
  for(const row of pb){if(row.stockAlreadyReserved)continue;for(const it of (row.items||[])){prod.set(it.productId,(prod.get(it.productId)||0)+Number(it.qty||0));batch.set(it.batchId,(batch.get(it.batchId)||0)+Number(it.qty||0))}}
@@ -663,7 +669,8 @@ window.saveBill=async()=>{
   bills.unshift(bill);set('bills',bills);set('batches',batches);set('products',products);
   const sm=get('stockMovements',[]);sm.push(...items.map((it,i)=>({id:bill.id+'_SM'+i,type:'SALE',productId:it.productId,batchId:it.batchId,batchNumber:it.batchNumber,qty:-Number(it.qty||0),reference:invoiceNumber,createdAt:new Date().toISOString()})));set('stockMovements',sm);
   if(mobile){customers=customers.filter(c=>String(c.mobile||'')!==String(mobile));customers.push({name:customerName,mobile,lastDoctor:doctor,lastPurchaseDate:today(),lastBillNumber:invoiceNumber});set('customers',customers)}
-  setPendingBills([...getPendingBills(),bill]);
+  // Only online-enabled builds need the duplicate pending-sync queue.
+  if(configured) setPendingBills([...getPendingBills(),bill]);
   // Clear the cart only after all local writes have succeeded.
   billCart=[];sourceOrderId='';['bCustomer','bMobile','bDoctor','bNote'].forEach(id=>{if($(id))$(id).value=''});if($('bDiscount'))$('bDiscount').value=0;if($('bGst'))$('bGst').value=0;window.setDiscountType?.('flat');
   renderAll();
