@@ -660,7 +660,7 @@ function showMedicineSuggestions(inputId,boxId,onPick){
  const render=()=>{
    const list=medicineMatches(input.value);
    if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
-   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
+   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : effectiveMedicineStock(p);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
    box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
       e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
       input.value=p.name; box.classList.remove('show'); onPick(p);
