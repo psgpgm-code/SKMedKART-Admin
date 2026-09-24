@@ -1103,9 +1103,42 @@ window.returnPurchase=async id=>{
   alert('Supplier return saved successfully.\nReturned: '+qty+' '+productName+'\nReason: '+reason+'\nStock recalculated automatically.');
 };
 
+window.showPurchaseReturnHistory=()=>{
+  const rows=(get(PURCHASE_RETURNS_KEY,[])||[]).slice().sort((a,b)=>t(b?.returnedAt||b?.createdAt)-t(a?.returnedAt||a?.createdAt));
+  const content=rows.length?rows.map(r=>{
+    const when=r?.returnedAt||r?.createdAt||'';
+    const date=when?new Date(when).toLocaleString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}):'-';
+    return '<div class=\"itemrow\"><b>↩️ '+esc(r.productName||r.medicine||'-')+'</b><br><span class=\"small\">Date '+esc(date)+' • Qty '+Number(r.qty||r.quantity||0)+' • Batch '+esc(r.batchNumber||'-')+' • Supplier '+esc(r.supplier||'-')+' • Reason '+esc(r.reason||'-')+(r.invoice?' • Invoice '+esc(r.invoice):'')+(r.note?' • Note '+esc(r.note):'')+'</span></div>';
+  }).join(''):'<div class=\"small\">No supplier returns recorded yet.</div>';
+  const modal=$('billModal'),body=$('billModalContent');
+  if(modal&&body){
+    body.innerHTML='<button class=\"secondary\" style=\"float:right\" onclick=\"closeBillView()\">✕ Close</button><h3>↩️ Supplier Return History</h3><div class=\"small\" style=\"margin-bottom:10px\">Total return entries: '+rows.length+'</div>'+content;
+    modal.classList.remove('hidden');
+    return;
+  }
+  let wrap=$('skmPurchaseReturnHistoryModal');
+  if(!wrap){
+    wrap=document.createElement('div');wrap.id='skmPurchaseReturnHistoryModal';wrap.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;padding:18px;overflow:auto';
+    document.body.appendChild(wrap);
+  }
+  wrap.innerHTML='<div style=\"max-width:760px;margin:30px auto;background:#fff;border-radius:12px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)\"><button class=\"secondary\" style=\"float:right\" onclick=\"this.closest(\'#skmPurchaseReturnHistoryModal\').remove()\">✕ Close</button><h3>↩️ Supplier Return History</h3><div class=\"small\" style=\"margin-bottom:10px\">Total return entries: '+rows.length+'</div>'+content+'</div>';
+};
+
+function ensurePurchaseReturnHistoryButton(){
+  const box=$('purchases');
+  if(!box||$('skmPurchaseReturnHistoryBtn'))return;
+  const btn=document.createElement('button');
+  btn.id='skmPurchaseReturnHistoryBtn';btn.type='button';btn.className='secondary';
+  btn.style.cssText='width:100%;margin:0 0 10px 0';
+  btn.textContent='↩️ Return History';
+  btn.onclick=window.showPurchaseReturnHistory;
+  box.parentNode?.insertBefore(btn,box);
+}
+
 window.renderPurchases=()=>{
  const input=$('purchaseSearch'),box=$('purchases');
  if(!input||!box)return;
+ ensurePurchaseReturnHistoryButton();
  const q=String(input.value||'').trim().toLowerCase();
  if(!q){box.innerHTML=purchases.slice(0,100).map(p=>purchaseRow(p)).join('')||'<div class="small">No purchases found.</div>';return}
  const purchaseRows=purchases.filter(p=>{
