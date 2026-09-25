@@ -1,5 +1,5 @@
 // V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX
-// V5.9.76 BILL QUOTA + LEGACY DATA RECOVERY: preserve older local ledgers while removing the redundant pending-bill queue.\n// Fixes: opening stock being erased by reconciliation; missing purchase rows are recovered only from original purchase movements.\n\n// Production fix: canonical stock is derived from Purchase History and unique Bill IDs.
+// V5.9.77 ROUND-OFF UI FIX: compact control placed below totals; example text removed.
 
 // V5.9.4 OFFLINE-FIRST: never clear existing local data.
 // A one-time Firebase migration copies existing cloud data into local storage.
@@ -715,9 +715,11 @@ function ensureRoundOffControl(){
  if(!box){
    box=document.createElement('div');
    box.id='roundOffControl';
-   box.style.cssText='margin:10px 0;padding:10px 14px;border-radius:14px;background:#eef5fb;border:1px solid #d6e3ef;';
-   box.innerHTML='<label style="display:flex;align-items:center;gap:10px;font-weight:800;color:#294b68;cursor:pointer"><input id="roundOffToggle" type="checkbox" style="width:20px;height:20px"> <span>Round Off Bill Total</span><span id="roundOffStatus" style="margin-left:auto;font-size:13px">OFF</span></label><div class="small" style="margin-top:4px">Nearest ₹1: ₹303.62 → ₹304.00</div>';
-   totalEl.parentElement?.appendChild(box);
+   box.style.cssText='margin:8px 0 4px;padding:7px 10px;border-radius:10px;background:#eef5fb;border:1px solid #d6e3ef;width:fit-content;max-width:100%;';
+   box.innerHTML='<label style="display:flex;align-items:center;gap:7px;font-size:14px;font-weight:700;color:#294b68;cursor:pointer;white-space:nowrap"><input id="roundOffToggle" type="checkbox" style="width:17px;height:17px;margin:0"> <span>Round Off Bill Total</span><span id="roundOffStatus" style="font-size:12px;font-weight:800">OFF</span></label>';
+   const totalCard=totalEl.closest('.card')||totalEl.parentElement;
+   if(totalCard?.parentElement) totalCard.parentElement.insertBefore(box,totalCard.nextSibling);
+   else totalEl.parentElement?.appendChild(box);
    $('roundOffToggle')?.addEventListener('change',e=>window.setRoundOff(e.target.checked));
  }
  const toggle=$('roundOffToggle'),status=$('roundOffStatus');
