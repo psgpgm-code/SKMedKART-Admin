@@ -34,14 +34,48 @@ function catalogRows(){
 }
 async function publishCustomerCatalog(force=false){
   if(catalogPublishBusy)return;
-  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY)return;
+  const status=$('catalogSyncStatus');
+  if(!SKM_SUPABASE_URL||!SKM_SUPABASE_PUBLISHABLE_KEY||!SKM_CATALOG_WRITE_KEY){
+    if(status)status.textContent='Customer catalogue sync unavailable: Supabase configuration missing.';
+    return;
+  }
+
+  const payload=catalogRows();
+  // Safety: never send an empty catalogue. The server-side publisher replaces
+  // the public catalogue, so an accidental empty local products array must not
+  // erase the existing customer catalogue.
+  if(!Array.isArray(payload)||payload.length===0){
+    if(status)status.textContent='Customer catalogue not updated: no products are loaded on this phone. Tap Refresh Data and try again.';
+    return;
+  }
+
+  if(status)status.textContent='Updating Customer catalogue ('+payload.length+' products)...';
   catalogPublishBusy=true;
-  const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),12000);
+  const controller=new AbortController();
+  const timeout=setTimeout(()=>controller.abort(),15000);
   try{
-    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{method:'POST',headers:{'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,'Content-Type':'application/json','x-skm-catalog-key':SKM_CATALOG_WRITE_KEY},body:JSON.stringify({catalog:catalogRows()}),signal:controller.signal});
-    const text=await r.text(); if(!r.ok)throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
-    const status=$('catalogSyncStatus'); if(status)status.textContent='Customer catalogue updated: '+catalogRows().length+' products • '+new Date().toLocaleTimeString('en-IN');
-  }catch(e){console.warn('Customer catalogue sync failed:',e)}finally{clearTimeout(timeout);catalogPublishBusy=false}
+    const r=await fetch(SKMedKART_CATALOG_RPC_URL(),{
+      method:'POST',
+      headers:{
+        'apikey':SKM_SUPABASE_PUBLISHABLE_KEY,
+        'Content-Type':'application/json',
+        'x-skm-catalog-key':SKM_CATALOG_WRITE_KEY
+      },
+      body:JSON.stringify({catalog:payload}),
+      signal:controller.signal,
+      cache:'no-store'
+    });
+    const text=await r.text();
+    if(!r.ok)throw Error('HTTP '+r.status+': '+(text||'Supabase RPC failed'));
+    if(status)status.textContent='Customer catalogue updated: '+payload.length+' products • '+new Date().toLocaleTimeString('en-IN');
+  }catch(e){
+    console.warn('Customer catalogue sync failed:',e);
+    const msg=e?.name==='AbortError'?'Timeout after 15 seconds':(e?.message||String(e));
+    if(status)status.textContent='Customer catalogue update failed: '+msg;
+  }finally{
+    clearTimeout(timeout);
+    catalogPublishBusy=false;
+  }
 }
 function scheduleCatalogPublish(){clearTimeout(catalogPublishTimer);catalogPublishTimer=setTimeout(()=>publishCustomerCatalog(),900)}
 window.publishCustomerCatalog=publishCustomerCatalog;
