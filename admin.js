@@ -28,7 +28,7 @@ function catalogRows(){
   for(const p of (products||[])){
     const id=String(p?.id||'').trim(); if(!id||!String(p?.name||'').trim())continue;
     const stock=Math.max(0,Number(effectiveMedicineStock(p)||0));
-    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,rx:p.rx===true,product_image:String(p.productImage||p.image||''),active:p.active!==false,updated_at:new Date().toISOString()});
+    rows.set(id,{id,name:String(p.name),category:String(p.cat||p.category||'Human Medicines'),price:Number(p.price||p.sellingPrice||0),mrp:Number(p.mrp||p.price||0),stock,rx:p.rx===true,product_image:String(p.image||p.productImage||''),active:p.active!==false,updated_at:new Date().toISOString()});
   }
   return [...rows.values()];
 }
@@ -449,8 +449,14 @@ function repairLocalStockConsistency(){
   for(const bill of bills){const billId=String(bill?.id||'');if(!billId||seenBills.has(billId)||bill?.returned)continue;seenBills.add(billId);for(const it of (bill?.items||[])){const q=Math.max(0,Number(it?.qty??it?.quantity??0));if(!q)continue;const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);if(!prod)continue;const b=resolveBatch(prod,it?.batchNumber||it?.batch,it?.batchId||'');if(!b)continue;const bid=String(b.id);saleQtyByBatch.set(bid,(saleQtyByBatch.get(bid)||0)+q)}}
   const adjustmentByBatch=new Map();
   for(const m of sm){const type=String(m?.type||'').toUpperCase();if(type!=='STOCK_ADJUSTMENT'&&type!=='ADJUSTMENT')continue;const prod=resolveProduct(m?.productId,m?.productName||m?.medicine);if(!prod)continue;const b=resolveBatch(prod,m?.batchNumber||m?.batch,m?.batchId||'');if(!b)continue;const bid=String(b.id);adjustmentByBatch.set(bid,(adjustmentByBatch.get(bid)||0)+Number(m?.qty||0))}
-  const stockByProduct=new Map();
-  for(const b of batches){const bid=String(b?.id||'');if(!bid)continue;let stock;if(purchaseQtyByBatch.has(bid)){const opening=(b?.openingStockSource==='MANUAL'||b?.openingStockSource==='OPENING_STOCK')?Math.max(0,Number(b?.openingStock||0)):0;stock=Math.max(0,opening+Number(purchaseQtyByBatch.get(bid)||0)-Number(saleQtyByBatch.get(bid)||0)+Number(adjustmentByBatch.get(bid)||0));b.stock=stock}else{stock=Math.max(0,Number(b?.stock||0))}const pid=String(b?.productId||'');if(pid)stockByProduct.set(pid,(stockByProduct.get(pid)||0)+stock)}
+  // Supplier returns are stored separately from the original purchase quantity.
+  const purchaseReturnByBatch=new Map();
+  for(const r of (get('purchaseReturns',[])||[])){
+    const q=Math.max(0,Number(r?.qty||r?.quantity||0)); if(!q)continue;
+    const bid=String(r?.batchId||''); if(!bid)continue;
+    purchaseReturnByBatch.set(bid,(purchaseReturnByBatch.get(bid)||0)+q);
+  }
+  for(const b of batches){const bid=String(b?.id||'');if(!bid)continue;let stock;if(purchaseQtyByBatch.has(bid)){const opening=(b?.openingStockSource==='MANUAL'||b?.openingStockSource==='OPENING_STOCK')?Math.max(0,Number(b?.openingStock||0)):0;stock=Math.max(0,opening+Number(purchaseQtyByBatch.get(bid)||0)-Number(saleQtyByBatch.get(bid)||0)-Number(purchaseReturnByBatch.get(bid)||0)+Number(adjustmentByBatch.get(bid)||0));b.stock=stock}else{stock=Math.max(0,Number(b?.stock||0))}const pid=String(b?.productId||'');if(pid)stockByProduct.set(pid,(stockByProduct.get(pid)||0)+stock)}
   for(const p of products){const pid=String(p?.id||'');if(!pid)continue;const hasBatch=batches.some(b=>String(b?.productId||'')===pid);p.stock=hasBatch?Math.max(0,Number(stockByProduct.get(pid)||0)):Math.max(0,Number(p?.stock||0))}
   set('batches',batches);set('products',products);localStorage.setItem('skm_stock_reconciled_v12','yes');
 }
@@ -604,7 +610,7 @@ window.checkMedicineAvailability=()=>{
  }).join('');
 };
 
-function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+30*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
+function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+60*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
 function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc){const keys=new Set(batches.map(b=>String(b?.productId||'')+'|'+String(b?.batchNumber||b?.batch||'').trim().toUpperCase()).filter(x=>!x.startsWith('|')));bc.textContent=keys.size;}const effectiveStockById=new Map(products.map(p=>[String(p.id),Math.max(0,effectiveMedicineStock(p))]));const zeroAlerts=zero;const lowAlerts=low.filter(p=>!zeroAlerts.includes(p));const catKey=p=>{const raw=String(p?.cat||p?.category||'Human Medicines').trim();const l=raw.toLowerCase();if(l.includes('veterinary'))return 'Veterinary';if(l.includes('human'))return 'Human Medicines';if(l.includes('baby'))return 'Baby Care';if(l.includes('pet'))return 'Pet Products';if(l.includes('health'))return 'Health';if(l.includes('device'))return 'Devices';if(l.includes('cosmetic'))return 'Cosmetics';return raw||'Other';};const catLabel={"Human Medicines":"💊 HUMAN MEDICINES","Veterinary":"🐾 VETERINARY MEDICINES","Baby Care":"👶 BABY PRODUCTS","Pet Products":"🐶 PET PRODUCTS","Health":"🩺 HEALTH CARE","Devices":"🩹 MEDICAL DEVICES","Cosmetics":"💄 COSMETICS",Other:"📦 OTHER"};const groups={};[...zeroAlerts.map(p=>({...p,__kind:'OUT OF STOCK'})),...lowAlerts.map(p=>({...p,__kind:'LOW STOCK'}))].forEach(p=>{const c=catKey(p);(groups[c]||(groups[c]=[])).push(p)});const alerts=[];Object.keys(groups).sort((a,b)=>{const order=['Human Medicines','Veterinary','Baby Care','Pet Products','Health','Devices','Cosmetics','Other'];return (order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b))}).forEach(c=>{alerts.push('<div style="font-weight:800;font-size:16px;margin:12px 0 6px">'+esc(catLabel[c]||c)+'</div>');groups[c].forEach(p=>{const effective=effectiveStockById.get(String(p.id))||0;alerts.push('<div class="warning">'+esc(p.__kind+': '+p.name+' ('+effective+')')+'</div>')})});exp.forEach(b=>alerts.push('<div class="warning">'+esc(expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)+'</div>'));$('alerts').innerHTML=alerts.join('')||'<div class="good">No urgent stock or expiry alerts.</div>';
 $('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
@@ -654,7 +660,7 @@ function showMedicineSuggestions(inputId,boxId,onPick){
  const render=()=>{
    const list=medicineMatches(input.value);
    if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
-   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
+   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : effectiveMedicineStock(p);return '<div class="medicineOption" data-id="'+esc(p.id)+'">'+(p.image?'<img src="'+esc(p.image)+'" alt="" style="width:38px;height:38px;object-fit:contain;float:left;margin-right:8px;border-radius:8px">':'')+'<b>'+esc(p.name)+'</b>'+(p.prescriptionRequired?'<span class="pill bad" style="margin-left:6px">Rx Required</span>':'')+'<small>Available stock: '+available+'</small><div style="clear:both"></div></div>'}).join('');
    box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
       e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
       input.value=p.name; box.classList.remove('show'); onPick(p);
@@ -679,6 +685,7 @@ function pickPurchaseMedicine(p){
  if($('puSchedule'))$('puSchedule').value=String(p?.schedule||'').toUpperCase().replace('SCHEDULE ','');
  if($('puMinQty'))$('puMinQty').value=Number(p?.lowStockLevel??10);
  if($('puManufacturer'))$('puManufacturer').value=p?.manufacturer||p?.manufacturerDetails||'';
+ ensurePurchaseProductMetaUI(); setPurchaseProductMetaUI(p); if($('puProductImage'))$('puProductImage').value='';
 }
 function syncBillMedicine(){pickBillMedicine(findMedicineBySearch($('bMedicineSearch').value))}
 function syncPurchaseMedicine(){pickPurchaseMedicine(findMedicineBySearch($('puProductSearch').value))}
@@ -687,7 +694,7 @@ showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedici
 showMedicineSuggestions('mcSearch','mcSuggest',p=>{if(p){$('mcSearch').value=p.name;window.checkMedicineAvailability()}});
 $('mcSearch')?.addEventListener('input',()=>{if($('mcSearch').value.trim())window.checkMedicineAvailability();else if($('mcResult'))$('mcResult').innerHTML='<div class="small">Search any medicine to check availability.</div>'});
 window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
-window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,manufacturer:b.manufacturer||b.manufacturerDetails||p.manufacturer||p.manufacturerDetails||'',qty,price});renderBilling()};
+window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,manufacturer:b.manufacturer||b.manufacturerDetails||p.manufacturer||p.manufacturerDetails||'',prescriptionRequired:!!p.prescriptionRequired,qty,price});renderBilling()};
 /* Bill discount can be either a flat rupee amount or a percentage. */
 window.setDiscountType=(type)=>{
   discountType=type==='percent'?'percent':'flat';
@@ -713,7 +720,7 @@ function billTotals(items=billCart){
  const gst=taxable*gstRate/100;
  return {subtotal:sub,discount,discountType,discountInput:rawDiscount,discountRate,gst,gstRate,grandTotal:taxable+gst}
 }
-function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b><br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
+function renderBilling(){const pv=$('billPreview');if(pv)pv.textContent='SKM-'+today().replaceAll('-','')+'-NEW';const z=billTotals();$('bSub').textContent=money(z.subtotal);$('bDisc').textContent=money(z.discount);$('bTax').textContent=money(z.gst);$('bTotal').textContent=money(z.grandTotal);$('billItems').innerHTML=billCart.map((x,i)=>'<div class="itemrow"><b>'+esc(x.name)+'</b>'+(x.prescriptionRequired?'<span class="pill bad" style="margin-left:6px">Rx Required</span>':'')+'<br><span class="small">Batch '+esc(x.batchNumber)+' • '+x.qty+' × '+money(x.price)+' • Exp '+esc(x.expiryDate)+'</span><button class="danger" style="width:auto;float:right" onclick="removeBillItem('+i+')">Remove</button></div>').join('')||'<div class="small">No items added.</div>'} window.removeBillItem=i=>{billCart.splice(i,1);renderBilling()};
 window.clearBill=()=>{billCart=[];sourceOrderId='';$('bCustomer').value='';$('bMobile').value='';$('bDoctor').value='';$('bNote').value='';$('bDiscount').value=0;$('bGst').value=0;window.setDiscountType('flat');renderBilling()};
 /* Live billing total update when Discount ₹ or GST % changes */
 window.recalculateBillTotals=()=>renderBilling();
@@ -933,7 +940,7 @@ async function syncPendingPurchases(){
       const existingProduct=ps.exists()?ps.data():{};
       const old=bs.exists()?bs.data():{};
       tx.set(br,{...old,id:bid,productId,productName:purchase.productName,category:purchase.category,cat:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,batchNumber:purchase.batchNumber,expiryDate:purchase.expiryDate,stock:Number(old.stock||0)+Number(purchase.qty||0),purchasePrice:Number(purchase.purchasePrice||0),purchaseGstRate:Number(purchase.purchaseGstRate||0),purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),mrp:Number(purchase.mrp||0),sellingPrice:Number(purchase.sellingPrice||0),updatedAt:serverTimestamp(),createdAt:old.createdAt||serverTimestamp()},{merge:true});
-      tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer||existingProduct.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||existingProduct.manufacturerDetails||'',price:Number(purchase.sellingPrice||existingProduct.price||0),stock:Number(existingProduct.stock||0)+Number(purchase.qty||0),lowStockLevel:Number(purchase.minQty||existingProduct.lowStockLevel||0),purchasePrice:Number(purchase.purchasePrice||0),purchaseGstRate:Number(purchase.purchaseGstRate||0),purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),mrp:Number(purchase.mrp||0),gst:Number(purchase.purchaseGstRate||0),active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
+      tx.set(pr,{...existingProduct,id:productId,name:purchase.productName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer||existingProduct.manufacturer||'',manufacturerDetails:purchase.manufacturerDetails||existingProduct.manufacturerDetails||'',price:Number(purchase.sellingPrice||existingProduct.price||0),stock:Number(existingProduct.stock||0)+Number(purchase.qty||0),lowStockLevel:Number(purchase.minQty||existingProduct.lowStockLevel||0),purchasePrice:Number(purchase.purchasePrice||0),purchaseGstRate:Number(purchase.purchaseGstRate||0),purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),mrp:Number(purchase.mrp||0),gst:Number(purchase.purchaseGstRate||0),prescriptionRequired:!!purchase.prescriptionRequired,...(purchase.image?{image:purchase.image}:{}),active:true,updatedAt:serverTimestamp(),createdAt:existingProduct.createdAt||serverTimestamp()},{merge:true});
       tx.set(purRef,{...purchase,createdAt:purchase.createdAt||serverTimestamp()},{merge:true});
       tx.set(doc(db,'stockMovements',purchase.id+'_SM'),{type:'PURCHASE',productId,batchId:bid,batchNumber:purchase.batchNumber,qty:Number(purchase.qty||0),reference:purchase.invoice||'PURCHASE',purchasePriceWithGst:Number(purchase.purchasePriceWithGst||0),createdAt:serverTimestamp()},{merge:true});
     });
@@ -947,14 +954,54 @@ function schedulePendingPurchaseSync(){clearTimeout(pendingPurchaseSyncTimer);pe
 window.addEventListener('online',schedulePendingPurchaseSync);
 setInterval(()=>{if(navigator.onLine)syncPendingPurchases().catch(console.error)},60000);
 
+
+function purchaseProductMetaValue(){
+  const imageInput=$('puProductImage'),rx=$('puPrescriptionRequired');
+  return {prescriptionRequired:!!rx?.checked,imageFile:imageInput?.files?.[0]||null};
+}
+function setPurchaseProductMetaUI(product){
+  const rx=$('puPrescriptionRequired'),preview=$('puProductImagePreview');
+  if(rx)rx.checked=!!product?.prescriptionRequired;
+  if(preview){
+    const src=product?.image||product?.imageUrl||'';
+    preview.innerHTML=src?'<img src="'+esc(src)+'" alt="Product" style="width:90px;height:90px;object-fit:contain;border:1px solid #dce4ed;border-radius:14px;background:#fff"> <span class="small">Current product image</span>':'<span class="small">No product image saved.</span>';
+  }
+}
+function ensurePurchaseProductMetaUI(){
+  if(document.getElementById('skPurchaseProductMeta'))return;
+  const anchor=$('puManufacturer')||$('puSchedule'); if(!anchor)return;
+  const box=document.createElement('div');box.id='skPurchaseProductMeta';box.className='card';box.style.cssText='padding:14px;margin:10px 0;background:#f8fbff';
+  box.innerHTML='<b>🖼️ Product Image</b><input id="puProductImage" type="file" accept="image/*" capture="environment" style="margin-top:8px"><div id="puProductImagePreview" style="display:flex;align-items:center;gap:10px;margin-top:8px"></div><label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-weight:700"><input id="puPrescriptionRequired" type="checkbox" style="width:auto;margin:0"> 💊 Prescription Required</label><div class="small" style="margin-top:5px">These settings belong to the medicine/product and can be updated from Purchase Entry.</div>';
+  anchor.insertAdjacentElement('afterend',box);
+  $('puProductImage')?.addEventListener('change',()=>{
+    const f=$('puProductImage').files?.[0],preview=$('puProductImagePreview');if(!f||!preview)return;
+    const url=URL.createObjectURL(f);preview.innerHTML='<img src="'+url+'" alt="Preview" style="width:90px;height:90px;object-fit:contain;border:1px solid #dce4ed;border-radius:14px;background:#fff"><span class="small">New image selected</span>';
+  });
+  setPurchaseProductMetaUI(null);
+}
+function readPurchaseImageFile(file){
+  if(!file)return Promise.resolve('');
+  return new Promise((resolve,reject)=>{
+    const fr=new FileReader();fr.onload=()=>{
+      const img=new Image();img.onload=()=>{
+        const max=700,scale=Math.min(1,max/Math.max(img.width,img.height));
+        const c=document.createElement('canvas');c.width=Math.max(1,Math.round(img.width*scale));c.height=Math.max(1,Math.round(img.height*scale));
+        const ctx=c.getContext('2d');ctx.fillStyle='#fff';ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
+        resolve(c.toDataURL('image/jpeg',0.78));
+      };img.onerror=()=>resolve(String(fr.result||''));img.src=String(fr.result||'');
+    };fr.onerror=reject;fr.readAsDataURL(file);
+  });
+}
+
 window.cancelPurchaseEdit=()=>{
   editingPurchaseId='';
   const btn=document.querySelector('#purchaseSaveBtn'); if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
   const cancel=$('purchaseEditCancel'); if(cancel)cancel.remove();
   ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});
-  resetPurchaseProductMetaUI();
   if($('puMinQty'))$('puMinQty').value='10'; if($('puCategory'))$('puCategory').value='Human Medicines'; if($('puSchedule'))$('puSchedule').value='';
   loadPurchaseHeaderDefaults();
+  if($('puProductImage'))$('puProductImage').value='';
+  setPurchaseProductMetaUI(null);
   renderPurchases();
 };
 window.editPurchase=async id=>{
@@ -966,77 +1013,22 @@ window.editPurchase=async id=>{
   $('puSchedule').value=['H','H1'].includes(String(purchase.schedule||'').toUpperCase())?String(purchase.schedule).toUpperCase():'';
   $('puBatch').value=purchase.batchNumber||purchase.batch||''; $('puExpiry').value=purchase.expiryDate||''; $('puQty').value=Number(purchase.qty||0); $('puDate').value=purchase.purchaseDate||today();
   $('puMinQty').value=Number(purchase.minQty??product.lowStockLevel??10); $('puManufacturer').value=purchase.manufacturer||purchase.manufacturerDetails||''; $('puSupplier').value=purchase.supplier||purchase.supplierName||''; $('puInvoice').value=purchase.invoice||purchase.invoiceNo||'';
-  if($('puPrescriptionRequired'))$('puPrescriptionRequired').checked=!!(purchase.prescriptionRequired??product.prescriptionRequired);
-  setPurchaseProductImagePreview(purchase.productImage||product.productImage||product.image||'');
   $('puCost').value=Number(purchase.purchasePrice||0); $('puGst').value=Number(purchase.purchaseGstRate||0); $('puMrp').value=Number(purchase.mrp||0); $('puSell').value=Number(purchase.sellingPrice||product.price||0); window.calculatePurchaseGst();
+  ensurePurchaseProductMetaUI(); setPurchaseProductMetaUI(product); if($('puProductImage'))$('puProductImage').value='';
   const btn=document.querySelector('#purchaseSaveBtn'); if(btn)btn.textContent='✏️ Update Purchase';
   if(!document.querySelector('#purchaseEditCancel')&&btn){const b=document.createElement('button');b.id='purchaseEditCancel';b.type='button';b.className='secondary';b.style.cssText='width:100%;margin-top:8px';b.textContent='✖ Cancel Edit';b.onclick=window.cancelPurchaseEdit;btn.parentNode.insertBefore(b,btn.nextSibling);}
   show('purchase'); window.scrollTo({top:0,behavior:'smooth'});
 };
-
-function resetPurchaseProductMetaUI(){
-  const input=$('puProductImage'),preview=$('puProductImagePreview');
-  if(input)input.value='';
-  if(preview)preview.innerHTML='';
-  if($('puPrescriptionRequired'))$('puPrescriptionRequired').checked=false;
-}
-function setPurchaseProductImagePreview(src){
-  const preview=$('puProductImagePreview');
-  if(!preview)return;
-  if(!src){preview.innerHTML='';return;}
-  preview.innerHTML='<div style="display:flex;align-items:center;gap:10px"><img src="'+esc(src)+'" alt="Product image" style="width:72px;height:72px;object-fit:contain;border:1px solid #ccd7e0;border-radius:8px;background:#fff"><span class="small">Current product image</span></div>';
-}
-function compressPurchaseProductImage(file){
-  return new Promise((resolve,reject)=>{
-    if(!file)return resolve('');
-    if(!String(file.type||'').startsWith('image/'))return reject(new Error('Please select an image file.'));
-    const reader=new FileReader();
-    reader.onerror=()=>reject(new Error('Could not read the selected image.'));
-    reader.onload=()=>{
-      const img=new Image();
-      img.onload=()=>{
-        const max=500,scale=Math.min(1,max/Math.max(img.naturalWidth||img.width,img.naturalHeight||img.height));
-        const w=Math.max(1,Math.round((img.naturalWidth||img.width)*scale));
-        const h=Math.max(1,Math.round((img.naturalHeight||img.height)*scale));
-        const canvas=document.createElement('canvas');canvas.width=w;canvas.height=h;
-        const ctx=canvas.getContext('2d');ctx.drawImage(img,0,0,w,h);
-        resolve(canvas.toDataURL('image/jpeg',0.78));
-      };
-      img.onerror=()=>reject(new Error('Could not process the selected image.'));
-      img.src=reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-async function getPurchaseProductImage(existing){
-  const file=$('puProductImage')?.files?.[0];
-  if(!file)return existing||'';
-  return await compressPurchaseProductImage(file);
-}
-function ensurePurchaseProductMetaUI(){
-  if(document.getElementById('skPurchaseProductMeta'))return;
-  const manufacturer=$('puManufacturer');
-  if(!manufacturer)return;
-  const host=manufacturer.closest('label')?.parentElement||manufacturer.parentElement;
-  if(!host)return;
-  const box=document.createElement('div');
-  box.id='skPurchaseProductMeta';
-  box.style.cssText='margin-top:10px;padding:10px;border:1px solid #d7e1ea;border-radius:10px;background:#fff';
-  box.innerHTML='<label class="small" style="display:block;font-weight:700;margin-bottom:6px">🖼️ Product Image</label><input id="puProductImage" type="file" accept="image/*" style="width:100%"><div id="puProductImagePreview" class="small" style="margin-top:7px"></div><label style="display:flex;align-items:center;gap:8px;margin:10px 0 0;font-weight:700;cursor:pointer"><input id="puPrescriptionRequired" type="checkbox" style="width:18px;height:18px;margin:0"> 💊 Prescription Required</label>';
-  host.appendChild(box);
-}
-document.addEventListener('DOMContentLoaded',ensurePurchaseProductMetaUI);
-setTimeout(ensurePurchaseProductMetaUI,300);
-setTimeout(ensurePurchaseProductMetaUI,1200);
 let purchaseActionLock=false,lastPurchaseActionKey='',lastPurchaseActionAt=0;
 // V5.9.55 PURCHASE DATA INTEGRITY: Purchase History owns supplier/cost/GST; product/batch masters must not overwrite prior purchase records.
 window.savePurchase=async()=>{
+  ensurePurchaseProductMetaUI();
+  const meta=purchaseProductMetaValue();
   const actionKey=[
     $('puProductSearch')?.value?.trim()||'', $('puProduct')?.value||'', $('puBatch')?.value?.trim()||'',
     $('puExpiry')?.value||'', $('puQty')?.value||'', $('puDate')?.value||'', $('puSupplier')?.value?.trim()||'',
     $('puInvoice')?.value?.trim()||'', $('puCost')?.value||'', $('puGst')?.value||'', $('puMrp')?.value||'',
-    $('puSell')?.value||'', $('puManufacturer')?.value?.trim()||'',
-    $('puPrescriptionRequired')?.checked?'1':'0', $('puProductImage')?.files?.[0]?.name||'', editingPurchaseId||''
+    $('puSell')?.value||'', $('puManufacturer')?.value?.trim()||'', meta.imageFile?.name||'', meta.prescriptionRequired?'RX1':'RX0', editingPurchaseId||''
   ].join('\u001f');
   const now=Date.now();
   // Protect the inventory ledger from rapid double-taps / repeated click events.
@@ -1048,15 +1040,14 @@ window.savePurchase=async()=>{
   const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
   const qty=Math.max(1,Number($('puQty').value)||0),minQty=Math.max(0,Number($('puMinQty')?.value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,manufacturer=$('puManufacturer')?.value.trim()||(product?.manufacturer||product?.manufacturerDetails||''),supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
-  const prescriptionRequired=!!$('puPrescriptionRequired')?.checked;
-  const existingPurchaseForImage=editingPurchaseId?purchases.find(x=>String(x.id)===String(editingPurchaseId)):null;
-  const productImage=await getPurchaseProductImage(existingPurchaseForImage?.productImage||product?.productImage||product?.image||'');
   const gst=window.calculatePurchaseGst(); const category=$('puCategory')?.value||product?.cat||'Human Medicines';
   const schedule=['H','H1'].includes(String($('puSchedule')?.value||'').toUpperCase())?String($('puSchedule').value).toUpperCase():'';
+  const imageData=meta.imageFile?await readPurchaseImageFile(meta.imageFile):'';
   if(!typedName||!batchNumber||!expiryDate||!qty)return alert('Complete Medicine Name, Batch No., Expiry Date and Purchase Qty.');
   try{
     if(editingPurchaseId){
       const purchase=purchases.find(x=>String(x.id)===String(editingPurchaseId)); if(!purchase)return alert('Purchase record not found. Please refresh and try again.');
+      if(purchaseReturnRowsForPurchase(purchase.id).length)return alert('This purchase has a supplier return recorded. For stock safety, it cannot be edited. Create a new purchase entry for any correction.');
       const originalProduct=products.find(x=>String(x.id)===String(purchase.productId)); if(!originalProduct)return alert('Original medicine/product not found.');
       if(String(product?.id||'')!==String(purchase.productId))return alert('For stock safety, the medicine cannot be changed while editing a purchase. Create a new purchase entry for another medicine.');
       const oldBatchNumber=String(purchase.batchNumber||purchase.batch||''),oldBid=String(purchase.productId)+'__'+oldBatchNumber,newBid=String(purchase.productId)+'__'+batchNumber,newStockMovements=get('stockMovements',[]),oldBatch=batches.find(x=>String(x.id)===oldBid); if(!oldBatch)return alert('Original batch not found. Refresh data before editing.');
@@ -1068,7 +1059,7 @@ window.savePurchase=async()=>{
         if(otherPurchases.length)return alert('That target batch already has another purchase entry. Choose a different batch number.');
         if(otherOldPurchases.length)return alert('This original batch has other purchase entries, so changing this batch number could mix stock history. Correct the batch details without changing the batch number.');
         if(Number(oldBatch.stock||0)<Number(purchase.qty||0))return alert('This purchase has already been partly/fully used from stock, so its batch number cannot be changed safely.');
-        const newBatch={...oldBatch,id:newBid,batchNumber,expiryDate,productName:purchase.productName,productId:purchase.productId,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,productImage,prescriptionRequired,stock:Number(purchase.qty||0),mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total};
+        const newBatch={...oldBatch,id:newBid,batchNumber,expiryDate,productName:purchase.productName,productId:purchase.productId,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,stock:Number(purchase.qty||0),mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total};
         batches=batches.filter(x=>String(x.id)!==oldBid); batches.push(newBatch);
       }else{
         const oldQty=Number(purchase.qty||0),delta=qty-oldQty;
@@ -1077,27 +1068,27 @@ window.savePurchase=async()=>{
         // Keep purchase-specific supplier/cost/GST immutable in Purchase History.
         // A later purchase of the same product+batch must not overwrite the earlier
         // purchase's commercial data. Batch keeps only operational/display values.
-        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,productImage,prescriptionRequired,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
+        Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
       }
-      const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,productImage,prescriptionRequired,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
+      const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty,prescriptionRequired:meta.prescriptionRequired,...(imageData?{image:imageData}:{}),};
       const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id)); if(pi>=0)purchases[pi]=updated;
       const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:newBid,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
-      originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer}); originalProduct.prescriptionRequired=prescriptionRequired; if(productImage)originalProduct.productImage=productImage;
-      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0;
+      originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer});
+      originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0; originalProduct.prescriptionRequired=meta.prescriptionRequired; if(imageData)originalProduct.image=imageData;
       // IMPORTANT: purchase cost/GST belong to the individual purchase record.
       // Never overwrite product-master purchase values while editing a purchase.
       // This prevents one purchase from changing another purchase's supplier/rate/GST context.
       originalProduct.stock=batches.filter(x=>String(x.productId)===String(originalProduct.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);
       set('stockMovements',newStockMovements);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases(getPendingPurchases().map(x=>String(x.id)===String(updated.id)?updated:x));
       editingPurchaseId=''; const cancel=$('purchaseEditCancel');if(cancel)cancel.remove();const btn=document.querySelector('#purchaseSaveBtn');if(btn)btn.textContent='💾 Save Purchase / Upload Stock';
-      ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer','puSupplier','puInvoice'].forEach(id=>{if($(id))$(id).value=''});resetPurchaseProductMetaUI();if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';if($('puDate'))$('puDate').value=today();
+      ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer','puSupplier','puInvoice'].forEach(id=>{if($(id))$(id).value=''});if($('puProductImage'))$('puProductImage').value='';setPurchaseProductMetaUI(null);if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';if($('puDate'))$('puDate').value=today();
       renderAll(); alert('Purchase updated successfully. Stock was adjusted safely.'); return;
     }
     const productId=product?.id||('product_'+uid());
-    const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,productImage,prescriptionRequired,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
-    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,productImage:purchase.productImage,prescriptionRequired:purchase.prescriptionRequired,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)} else {product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails});product.prescriptionRequired=purchase.prescriptionRequired;if(purchase.productImage)product.productImage=purchase.productImage}
+    const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty,prescriptionRequired:meta.prescriptionRequired,...(imageData?{image:imageData}:{}),};
+    if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true,prescriptionRequired:meta.prescriptionRequired,...(imageData?{image:imageData}:{})};products.push(product)} else {product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;product.prescriptionRequired=meta.prescriptionRequired;if(imageData)product.image=imageData;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails})}
     let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){
-      b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.productImage=purchase.productImage;b.prescriptionRequired=purchase.prescriptionRequired;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
+      b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
       // Do NOT overwrite existing batch supplier/purchase cost/GST. Those values
       // are purchase-entry specific and remain in Purchase History.
     } else {b={id:productId+'__'+batchNumber,...purchase,stock:qty};batches.push(b)}
@@ -1108,13 +1099,92 @@ window.savePurchase=async()=>{
     set('stockMovements',sm);set('batches',batches);set('products',products);set('purchases',purchases);setPendingPurchases([...getPendingPurchases(),purchase]); schedulePendingPurchaseSync();
     alert('Purchase saved. Stock increased and Purchase Price + GST calculated automatically.\nSaved safely on this phone.');
     savePurchaseHeaderDefaults();
-    ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});resetPurchaseProductMetaUI();if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';loadPurchaseHeaderDefaults();renderAll()
+    ['puProductSearch','puProduct','puBatch','puExpiry','puQty','puCost','puGst','puCostWithGst','puMrp','puSell','puManufacturer'].forEach(id=>{if($(id))$(id).value=''});if($('puProductImage'))$('puProductImage').value='';setPurchaseProductMetaUI(null);if($('puMinQty'))$('puMinQty').value='10';if($('puCategory'))$('puCategory').value='Human Medicines';if($('puSchedule'))$('puSchedule').value='';loadPurchaseHeaderDefaults();renderAll()
   }catch(e){alert('Could not save purchase: '+e.message)}
 };
+
+const PURCHASE_RETURNS_KEY='purchaseReturns';
+function purchaseReturnRowsForPurchase(purchaseId){
+  return (get(PURCHASE_RETURNS_KEY,[])||[]).filter(r=>String(r.purchaseId||'')===String(purchaseId||''));
+}
+function remainingPurchaseQty(purchase){
+  const original=Math.max(0,Number(purchase?.qty??purchase?.quantity??0));
+  const returned=purchaseReturnRowsForPurchase(purchase?.id).reduce((n,r)=>n+Math.max(0,Number(r?.qty??r?.quantity??0)),0);
+  return Math.max(0,original-returned);
+}
+window.returnPurchase=async id=>{
+  const purchase=purchases.find(x=>String(x.id)===String(id));
+  if(!purchase)return alert('Purchase record not found.');
+  if(configured)return alert('Firebase/cloud mode is disabled for this build. Supplier returns are local-only.');
+  const product=products.find(x=>String(x.id)===String(purchase.productId));
+  const productName=purchase.productName||product?.name||'this medicine';
+  const batchNumber=String(purchase.batchNumber||purchase.batch||'');
+  const batch=batches.find(x=>String(x.id)===String(purchase.batchId||'') ||
+    (String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber));
+  if(!batch)return alert('Original batch not found. Refresh data before returning this purchase.');
+  const remainingFromPurchase=remainingPurchaseQty(purchase);
+  const availableStock=Math.max(0,Number(batch.stock||0));
+  const maxQty=Math.min(availableStock,remainingFromPurchase);
+  if(maxQty<=0)return alert('No quantity can be returned for this purchase.\n\nPurchase remaining: '+remainingFromPurchase+'\nCurrent batch stock: '+availableStock+'\n\nAlready sold/used stock cannot be returned.');
+  const qtyInput=prompt('Return quantity to supplier for '+productName+'\nBatch: '+(batchNumber||'-')+'\nMaximum return quantity: '+maxQty,String(maxQty));
+  if(qtyInput===null)return;
+  const qty=Number(qtyInput);
+  if(!Number.isFinite(qty)||qty<=0||qty>maxQty)return alert('Enter a valid return quantity from 0.01 to '+maxQty+'.');
+  const reasonInput=prompt('Reason for supplier return:\n1 = Damage\n2 = Non-moving\n3 = Other','1');
+  if(reasonInput===null)return;
+  const reasonMap={'1':'Damage','2':'Non-moving','3':'Other'};
+  const reason=reasonMap[String(reasonInput).trim()]||String(reasonInput).trim();
+  if(!reason)return alert('Return reason is required.');
+  const note=prompt('Optional return note:','')||'';
+  const returns=get(PURCHASE_RETURNS_KEY,[])||[],now=new Date().toISOString();
+  const returnId='PR'+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
+  returns.unshift({id:returnId,purchaseId:String(purchase.id),productId:String(purchase.productId||''),productName,batchId:String(batch.id),batchNumber,qty,reason,note,supplier:String(purchase.supplier||purchase.supplierName||''),invoice:String(purchase.invoice||purchase.invoiceNo||''),returnedAt:now});
+  const movements=get('stockMovements',[])||[];
+  movements.push({id:returnId+'_SM',type:'PURCHASE_RETURN',productId:String(purchase.productId||''),batchId:String(batch.id),batchNumber,qty:-qty,reference:returnId,purchaseId:String(purchase.id),reason,note,createdAt:now});
+  purchase.returnedQty=Math.max(0,Number(purchase.returnedQty||0))+qty;
+  purchase.lastReturnAt=now;purchase.lastReturnReason=reason;
+  const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id));if(pi>=0)purchases[pi]=purchase;
+  set(PURCHASE_RETURNS_KEY,returns);set('stockMovements',movements);set('purchases',purchases);
+  repairLocalStockConsistency();renderAll();
+  alert('Supplier return saved successfully.\nReturned: '+qty+' '+productName+'\nReason: '+reason+'\nStock recalculated automatically.');
+};
+
+window.showPurchaseReturnHistory=()=>{
+  const rows=(get(PURCHASE_RETURNS_KEY,[])||[]).slice().sort((a,b)=>t(b?.returnedAt||b?.createdAt)-t(a?.returnedAt||a?.createdAt));
+  const content=rows.length?rows.map(r=>{
+    const when=r?.returnedAt||r?.createdAt||'';
+    const date=when?new Date(when).toLocaleString('en-IN',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}):'-';
+    return '<div class=\"itemrow\"><b>↩️ '+esc(r.productName||r.medicine||'-')+'</b><br><span class=\"small\">Date '+esc(date)+' • Qty '+Number(r.qty||r.quantity||0)+' • Batch '+esc(r.batchNumber||'-')+' • Supplier '+esc(r.supplier||'-')+' • Reason '+esc(r.reason||'-')+(r.invoice?' • Invoice '+esc(r.invoice):'')+(r.note?' • Note '+esc(r.note):'')+'</span></div>';
+  }).join(''):'<div class=\"small\">No supplier returns recorded yet.</div>';
+  const modal=$('billModal'),body=$('billModalContent');
+  if(modal&&body){
+    body.innerHTML='<button class=\"secondary\" style=\"float:right\" onclick=\"closeBillView()\">✕ Close</button><h3>↩️ Supplier Return History</h3><div class=\"small\" style=\"margin-bottom:10px\">Total return entries: '+rows.length+'</div>'+content;
+    modal.classList.remove('hidden');
+    return;
+  }
+  let wrap=$('skmPurchaseReturnHistoryModal');
+  if(!wrap){
+    wrap=document.createElement('div');wrap.id='skmPurchaseReturnHistoryModal';wrap.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;padding:18px;overflow:auto';
+    document.body.appendChild(wrap);
+  }
+  wrap.innerHTML='<div style=\"max-width:760px;margin:30px auto;background:#fff;border-radius:12px;padding:16px;box-shadow:0 10px 30px rgba(0,0,0,.25)\"><button class=\"secondary\" style=\"float:right\" onclick=\"this.closest(\'#skmPurchaseReturnHistoryModal\').remove()\">✕ Close</button><h3>↩️ Supplier Return History</h3><div class=\"small\" style=\"margin-bottom:10px\">Total return entries: '+rows.length+'</div>'+content+'</div>';
+};
+
+function ensurePurchaseReturnHistoryButton(){
+  const box=$('purchases');
+  if(!box||$('skmPurchaseReturnHistoryBtn'))return;
+  const btn=document.createElement('button');
+  btn.id='skmPurchaseReturnHistoryBtn';btn.type='button';btn.className='secondary';
+  btn.style.cssText='width:100%;margin:0 0 10px 0';
+  btn.textContent='↩️ Return History';
+  btn.onclick=window.showPurchaseReturnHistory;
+  box.parentNode?.insertBefore(btn,box);
+}
 
 window.renderPurchases=()=>{
  const input=$('purchaseSearch'),box=$('purchases');
  if(!input||!box)return;
+ ensurePurchaseReturnHistoryButton();
  const q=String(input.value||'').trim().toLowerCase();
  if(!q){box.innerHTML=purchases.slice(0,100).map(p=>purchaseRow(p)).join('')||'<div class="small">No purchases found.</div>';return}
  const purchaseRows=purchases.filter(p=>{
@@ -1137,7 +1207,7 @@ window.renderPurchases=()=>{
  box.innerHTML='<div class="small">No purchases or products found for “'+esc(input.value)+'”.</div>';
 };
 
-function purchaseRow(p){const pid=esc(p.id||'');return '<div class=\"itemrow\"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+'<br><span class=\"small\">'+(p.manufacturer||p.manufacturerDetails?('Manufacturer: '+esc(p.manufacturer||p.manufacturerDetails)+' • '):'')+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span><div class=\"actions\"><button class=\"secondary\" type=\"button\" data-edit-purchase=\"'+pid+'\" onclick=\"window.editPurchase(this.dataset.editPurchase)\">✏️ Edit Purchase</button><button class=\"danger\" type=\"button\" data-delete-purchase=\"'+pid+'\" onclick=\"window.deletePurchase(this.dataset.deletePurchase)\">🗑️ Delete Purchase</button></div></div>'}
+function purchaseRow(p){const pid=esc(p.id||'');const returned=purchaseReturnRowsForPurchase(p.id).reduce((n,r)=>n+Math.max(0,Number(r?.qty||r?.quantity||0)),0);const remaining=Math.max(0,Number(p.qty||p.quantity||0)-returned);return '<div class="itemrow"><b>'+esc(p.productName||p.medicine||p.name||'-')+'</b> • Qty '+Number(p.qty||0)+(returned?' • Returned '+returned+' • Remaining '+remaining:'')+'<br><span class="small">'+(p.manufacturer||p.manufacturerDetails?('Manufacturer: '+esc(p.manufacturer||p.manufacturerDetails)+' • '):'')+esc(p.supplier||p.supplierName||'-')+' • Batch '+esc(p.batchNumber||p.batch||'-')+' • Exp '+esc(p.expiryDate||'-')+' • Purchase ₹'+Number(p.purchasePrice||0).toFixed(2)+' + GST '+Number(p.purchaseGstRate||0).toFixed(2)+'% = ₹'+Number(p.purchasePriceWithGst??(Number(p.purchasePrice||0)*(1+Number(p.purchaseGstRate||0)/100))).toFixed(2)+'</span><div class="actions"><button class="secondary" type="button" data-edit-purchase="'+pid+'" onclick="window.editPurchase(this.dataset.editPurchase)">✏️ Edit Purchase</button><button class="secondary" type="button" data-return-purchase="'+pid+'" onclick="window.returnPurchase(this.dataset.returnPurchase)">↩️ Return to Supplier</button><button class="danger" type="button" data-delete-purchase="'+pid+'" onclick="window.deletePurchase(this.dataset.deletePurchase)">🗑️ Delete Purchase</button></div></div>'}
 
 window.deletePurchase=async id=>{
  const purchase=purchases.find(x=>String(x.id)===String(id));
@@ -1147,6 +1217,7 @@ window.deletePurchase=async id=>{
  const batchNumber=String(purchase.batchNumber||purchase.batch||'');
  const qty=Number(purchase.qty||0);
  if(!qty)return alert('This purchase has no valid quantity to delete.');
+ if(purchaseReturnRowsForPurchase(purchase.id).length)return alert('This purchase has a supplier return recorded. For stock safety, it cannot be deleted.');
  const batch=batches.find(x=>String(x.id)===String(purchase.batchId||'') || (String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber));
  if(!confirm('Delete this purchase entry?\n\nMedicine: '+productName+'\nBatch: '+(batchNumber||'-')+'\nQty: '+qty+'\n\nThe purchase record and its stock contribution will be removed. This cannot be undone.'))return;
  try{
@@ -1181,7 +1252,24 @@ window.deletePurchase=async id=>{
    alert('Purchase deleted successfully. Stock was recalculated automatically.');
  }catch(e){alert('Could not delete purchase: '+e.message)}
 };
-function renderBatches(){$('batchList').innerHTML=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{const st=expiryStatus(b);return '<div class=\"itemrow\"><b>'+esc(b.productName||b.productId)+'</b><span class=\"pill '+(st==='OK'?'':'bad')+'\">'+st+'</span><br><span class=\"small\">Batch '+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+' • MRP '+money(b.mrp)+' • Sell '+money(b.sellingPrice)+'</span><br><button class=\"danger\" style=\"margin-top:8px;width:auto\" onclick=\"deleteBatch(\''+esc(b.id)+'\')\">🗑️ Delete This Batch</button></div>'}).join('')||'<div class=\"small\">No batches yet. Add stock through Purchase or Opening Stock.</div>'}
+function ensureExpiryReturnStyles(){
+  if(document.getElementById('skm-expiry-return-style'))return;
+  const style=document.createElement('style');style.id='skm-expiry-return-style';
+  style.textContent='.expiry-near-blink{animation:skmExpiryBlink 1.2s steps(2,end) infinite;border:2px solid currentColor}.expiry-blink-badge,.expiry-lowest-badge{font-weight:800;display:inline-block;margin-left:6px}.expiry-blink-badge{animation:skmExpiryBadgeBlink 1s steps(2,end) infinite}@keyframes skmExpiryBlink{50%{opacity:.48}}@keyframes skmExpiryBadgeBlink{50%{opacity:.25}}';
+  document.head.appendChild(style);
+}
+function renderBatches(){
+  ensureExpiryReturnStyles();
+  const live=batches.filter(b=>Number(b?.stock||0)>0&&expiryStatus(b)!=='EXPIRED'&&t(b?.expiryDate));
+  const lowestId=live.length?String(live.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate))[0].id):'';
+  const rows=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{
+    const st=expiryStatus(b),isNear=st==='NEAR EXPIRY'&&Number(b?.stock||0)>0,isLowest=String(b?.id||'')===lowestId;
+    const flags=(isLowest?' <span class="expiry-lowest-badge">⚠️ LOWEST EXPIRY</span>':'')+(isNear?' <span class="expiry-blink-badge">⏳ NEAR EXPIRY</span>':'');
+    const cls=isNear?' expiry-near-blink':'';
+    return '<div class="itemrow'+cls+'"><b>'+esc(b.productName||b.productId)+'</b><span class="pill '+(st==='OK'?'':'bad')+'">'+st+'</span>'+flags+'<br><span class="small">Batch '+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+' • MRP '+money(b.mrp)+' • Sell '+money(b.sellingPrice)+'</span><br><button class="danger" style="margin-top:8px;width:auto" onclick="deleteBatch(\''+esc(b.id)+'\')">🗑️ Delete This Batch</button></div>'
+  }).join('');
+  $('batchList').innerHTML=rows||'<div class="small">No batches yet. Add stock through Purchase or Opening Stock.</div>';
+}
 
 window.deleteBatch=async (id)=>{const b=batches.find(x=>x.id===id);if(!b)return alert('Batch not found.');if(!confirm('Delete batch '+(b.batchNumber||'')+' for '+(b.productName||'this medicine')+'? This cannot be undone. Current stock '+Number(b.stock||0)+' will be removed from inventory.'))return;try{if(configured){await runTransaction(db,async tx=>{const br=doc(db,'batches',id),pr=doc(db,'products',b.productId),bs=await tx.get(br),ps=await tx.get(pr);if(!bs.exists())throw Error('Batch not found.');const live=bs.data();if(ps.exists()){const next=Math.max(0,Number(ps.data().stock||0)-Number(live.stock||0));tx.update(pr,{stock:next,updatedAt:serverTimestamp()});}tx.delete(br);tx.set(doc(collection(db,'stockMovements')),{type:'BATCH_DELETE',productId:live.productId||b.productId,batchId:id,batchNumber:live.batchNumber||b.batchNumber,qty:-Number(live.stock||0),reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:serverTimestamp()});});}else{const qty=Number(b.stock||0),prod=products.find(x=>x.id===b.productId);batches=batches.filter(x=>x.id!==id);if(prod)prod.stock=batches.filter(x=>String(x.productId)===String(prod.id)).reduce((n,x)=>n+Math.max(0,Number(x.stock||0)),0);set('batches',batches);set('products',products);const sm=get('stockMovements',[]);sm.push({id:'DEL'+Date.now(),type:'BATCH_DELETE',productId:b.productId,batchId:id,batchNumber:b.batchNumber,qty:-qty,reference:'ADMIN_BATCH_DELETE',note:'Mistaken stock/batch deleted by admin',createdAt:new Date().toISOString()});set('stockMovements',sm);}alert('Batch deleted successfully. Product stock has been recalculated.');renderAll()}catch(e){alert('Could not delete batch: '+e.message)}};
 function orderOptions(cur){return ['Order Placed','Prescription Under Pharmacist Review','Confirmed','Payment Pending','Ready','Out for Delivery','Delivered','Billed','Need Clarification','Cancelled'].map(st=>'<option '+(st===cur?'selected':'')+'>'+st+'</option>').join('')};
@@ -1543,6 +1631,14 @@ window.addEventListener('DOMContentLoaded',()=>{window.calculatePurchaseGst?.();
    Scans a medicine-pack QR code and auto-fills Purchase Entry fields when
    the QR payload contains product/GTIN, batch and/or expiry information.
    Existing Firebase collections, data and features are untouched. */
+
+// V5.9.XX PRODUCT IMAGE + PRESCRIPTION FLAG: additive Purchase Entry controls only.
+(function(){
+  const init=()=>{try{ensurePurchaseProductMetaUI();}catch(e){console.warn('Purchase product meta UI:',e)}};
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',init);else init();
+  setTimeout(init,300);setTimeout(init,1200);
+})();
+
 (function(){
   const QR_STATE={running:false,stop:null,loaded:false};
   const pick=(...ids)=>{for(const id of ids){const el=document.getElementById(id);if(el)return el;}return null;};
