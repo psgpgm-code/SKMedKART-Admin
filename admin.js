@@ -641,11 +641,86 @@ function batchesForProduct(p){
 function effectiveMedicineStock(p){
  const pid=String(p?.id??'');
  if(!pid)return 0;
- if(effectiveStockCache.has(pid))return effectiveStockCache.get(pid);
- const related=batches.filter(b=>String(b?.productId??'')===pid);
- const total=related.reduce((n,b)=>n+Math.max(0,Number(b?.stock||0)),0);
- const value=related.length?total:Math.max(0,Number(p?.stock||0));
- effectiveStockCache.set(pid,value);return value;
+
+ if(effectiveStockCache.has(pid)){
+   return effectiveStockCache.get(pid);
+ }
+
+ // CANONICAL STOCK:
+ // Purchase Qty - Sales Qty + Customer Returns - Supplier Returns
+ let purchaseQty=0;
+ let salesQty=0;
+ let customerReturnQty=0;
+ let supplierReturnQty=0;
+
+ // 1. Total purchased quantity
+ for(const pu of purchases){
+   if(String(pu?.productId??'')===pid){
+     purchaseQty += Math.max(
+       0,
+       Number(pu?.qty ?? pu?.quantity ?? 0)
+     );
+   }
+ }
+
+ // 2. Total billed/sold quantity
+ for(const bill of bills){
+   if(bill?.returned) continue;
+
+   for(const item of (bill?.items||[])){
+     if(String(item?.productId??'')===pid){
+       salesQty += Math.max(
+         0,
+         Number(item?.qty ?? item?.quantity ?? 0)
+       );
+     }
+   }
+ }
+
+ // 3. Customer bill returns
+ for(const bill of bills){
+   if(!bill?.returned) continue;
+
+   for(const item of (bill?.items||[])){
+     if(String(item?.productId??'')===pid){
+       customerReturnQty += Math.max(
+         0,
+         Number(item?.qty ?? item?.quantity ?? 0)
+       );
+     }
+   }
+ }
+
+ // 4. Supplier returns
+ const supplierReturns = get('stockMovements',[]) || [];
+
+ for(const m of supplierReturns){
+   if(String(m?.productId??'')!==pid) continue;
+
+   const type=String(m?.type||'').toUpperCase();
+
+   if(
+     type==='PURCHASE_RETURN' ||
+     type==='RETURN_TO_SUPPLIER'
+   ){
+     supplierReturnQty += Math.max(
+       0,
+       Number(m?.qty ?? 0)
+     );
+   }
+ }
+
+ // Final stock
+ const value=Math.max(
+   0,
+   purchaseQty
+   - salesQty
+   + customerReturnQty
+   - supplierReturnQty
+ );
+
+ effectiveStockCache.set(pid,value);
+ return value;
 }
 function findMedicineBySearch(value){
  const q=String(value||'').trim().toLowerCase(); if(!q)return null;
