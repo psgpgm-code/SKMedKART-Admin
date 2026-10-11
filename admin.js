@@ -941,6 +941,87 @@ async function restoreData(data){
   localStorage.setItem('skm_stock_repair_v5_done','yes');
  }
 }
+
+// SKMedKART OPTIONAL GOOGLE DRIVE BACKUP — isolated from local billing/stock.
+// Uses Google Identity Services and drive.file scope; never stores access tokens.
+const SKM_DRIVE_CLIENT_ID='264356759907-rvjdshvul0o3c35qcqoe6ka02lj7nf8p.apps.googleusercontent.com';
+const SKM_DRIVE_SCOPE='https://www.googleapis.com/auth/drive.file';
+const SKM_DRIVE_FILENAME='SKMedKART_Drive_Backup.json';
+const SKM_DRIVE_LAST_KEY='skm_drive_last_backup_day_v1';
+let skmDriveToken='',skmDriveTokenUntil=0,skmDriveBusy=false,skmDriveScriptPromise=null;
+function skmDriveStatus(s){const e=$('skmDriveStatus');if(e)e.textContent=s}
+function skmDriveReady(){return !!(skmDriveToken&&Date.now()<skmDriveTokenUntil-60000)}
+function skmDriveLoadGIS(){
+ if(window.google?.accounts?.oauth2)return Promise.resolve();
+ if(skmDriveScriptPromise)return skmDriveScriptPromise;
+ skmDriveScriptPromise=new Promise((resolve,reject)=>{const s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';s.async=true;s.onload=()=>window.google?.accounts?.oauth2?resolve():reject(Error('Google sign-in unavailable'));s.onerror=()=>reject(Error('Google sign-in script could not load'));document.head.appendChild(s)}).catch(e=>{skmDriveScriptPromise=null;throw e});
+ return skmDriveScriptPromise;
+}
+async function skmDriveAuthorize(interactive=true){
+ if(skmDriveReady())return skmDriveToken;
+ if(!interactive)throw Error('Connect Google Drive first.');
+ await skmDriveLoadGIS();
+ return new Promise((resolve,reject)=>{
+  let settled=false;
+  const client=google.accounts.oauth2.initTokenClient({client_id:SKM_DRIVE_CLIENT_ID,scope:SKM_DRIVE_SCOPE,callback:response=>{
+   if(settled)return;settled=true;
+   if(response.error)return reject(Error(response.error_description||response.error));
+   skmDriveToken=response.access_token;skmDriveTokenUntil=Date.now()+(Number(response.expires_in)||3600)*1000;resolve(skmDriveToken);
+  },error_callback:e=>{if(settled)return;settled=true;reject(Error(e?.message||e?.type||'Google sign-in cancelled'))}});
+  client.requestAccessToken({prompt:'consent'});
+ });
+}
+async function skmDriveFetch(url,options={}){
+ if(!skmDriveReady())throw Error('Google Drive session expired. Tap Connect Drive again.');
+ const headers=new Headers(options.headers||{});headers.set('Authorization','Bearer '+skmDriveToken);
+ const r=await fetch(url,{...options,headers});
+ if(!r.ok){let detail='';try{const v=await r.json();detail=v.error?.message||''}catch{}if(r.status===401){skmDriveToken='';skmDriveTokenUntil=0}throw Error('Drive HTTP '+r.status+(detail?': '+detail:''))}
+ return r;
+}
+async function skmDriveFindBackup(){
+ const q="name = '"+SKM_DRIVE_FILENAME+"' and trashed = false";
+ const url='https://www.googleapis.com/drive/v3/files?spaces=drive&fields=nextPageToken,files(id,name,modifiedTime,size)&page_size=100&q='+encodeURIComponent(q);
+ const json=await (await skmDriveFetch(url)).json();
+ return (json.files||[]).sort((a,b)=>String(b.modifiedTime||'').localeCompare(String(a.modifiedTime||'')))[0]||null;
+}
+async function skmDriveUpload(){
+ // Preserve the existing backupData format and keep exactly one app-managed file.
+ const data=await backupData();
+ const content=JSON.stringify(data);
+ const existing=await skmDriveFindBackup();
+ const boundary='skm_drive_'+Date.now();
+ const meta=existing?{name:SKM_DRIVE_FILENAME}:{name:SKM_DRIVE_FILENAME,mimeType:'application/json'};
+ const body='--'+boundary+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify(meta)+'\r\n--'+boundary+'\r\nContent-Type: application/json\r\n\r\n'+content+'\r\n--'+boundary+'--';
+ const url=existing?'https://www.googleapis.com/upload/drive/v3/files/'+encodeURIComponent(existing.id)+'?uploadType=multipart&fields=id,name,modifiedTime':'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,modifiedTime';
+ const r=await skmDriveFetch(url,{method:existing?'PATCH':'POST',headers:{'Content-Type':'multipart/related; boundary='+boundary},body});
+ const result=await r.json();localStorage.setItem(SKM_DRIVE_LAST_KEY,today());return result;
+}
+async function skmDriveWithBusy(fn){if(skmDriveBusy)return;skmDriveBusy=true;try{await fn()}catch(e){skmDriveStatus('❌ '+e.message);alert('Google Drive: '+e.message)}finally{skmDriveBusy=false}}
+window.skmConnectDrive=()=>skmDriveWithBusy(async()=>{skmDriveStatus('Connecting to Google...');await skmDriveAuthorize(true);skmDriveStatus('✓ Google Drive connected.');await skmDriveAutoBackup()});
+window.skmBackupDrive=()=>skmDriveWithBusy(async()=>{skmDriveStatus('Connecting to Google...');await skmDriveAuthorize(true);skmDriveStatus('Uploading backup to Google Drive...');await skmDriveUpload();skmDriveStatus('✓ Drive backup saved: '+new Date().toLocaleString('en-IN'))});
+window.skmRestoreDrive=()=>skmDriveWithBusy(async()=>{
+ skmDriveStatus('Connecting to Google...');await skmDriveAuthorize(true);
+ skmDriveStatus('Finding Drive backup...');const file=await skmDriveFindBackup();if(!file)throw Error('No SKMedKART backup found in this Google account.');
+ const r=await skmDriveFetch('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(file.id)+'?alt=media');
+ const data=await r.json();if(data?.app!=='SKMedKART Admin Portal'||!data?.collections||!Array.isArray(data.collections.products)||!Array.isArray(data.collections.bills))throw Error('Drive file is not a valid SKMedKART backup.');
+ if(!confirm('RESTORE GOOGLE DRIVE BACKUP?\n\nBackup date: '+String(data.createdAt||'Unknown')+'\n\nThis replaces current local pharmacy records. Download a LOCAL BACKUP first.\n\nContinue?')){skmDriveStatus('Restore cancelled.');return}
+ skmDriveStatus('Restoring Drive backup...');await restoreData(data);if(!configured){liveStarted=false;await loadAll()}skmDriveStatus('✓ Drive restore completed.');alert('Drive restore completed. Verify bills and stock before continuing.');
+});
+async function skmDriveAutoBackup(){
+ if(!skmDriveReady()||skmDriveBusy||localStorage.getItem(SKM_DRIVE_LAST_KEY)===today())return;
+ skmDriveStatus('Daily Drive backup in progress...');
+ try{await skmDriveUpload();skmDriveStatus('✓ Daily Drive backup saved.')}catch(e){skmDriveStatus('⚠ Daily backup failed: '+e.message)}
+}
+function skmDriveMountUI(){
+ if($('skmDriveBackupUI'))return;
+ const anchor=$('restoreStatus')||$('restoreFile');if(!anchor)return;
+ const box=document.createElement('div');box.id='skmDriveBackupUI';box.style.cssText='border:1px solid #a5b4fc;border-radius:12px;padding:12px;margin:12px 0;background:#eef2ff;color:#172554';
+ box.innerHTML='<b>☁️ Google Drive Backup (Optional)</b><div style="font-size:12px;margin:5px 0">Only backups use internet. Billing, purchases and stock remain offline.</div><div style="display:flex;gap:6px;flex-wrap:wrap"><button type="button" onclick="skmConnectDrive()">🔗 Connect Drive</button><button type="button" onclick="skmBackupDrive()">☁️ Backup Now</button><button type="button" onclick="skmRestoreDrive()">↩ Restore from Drive</button></div><div id="skmDriveStatus" style="font-size:12px;margin-top:7px" aria-live="polite">Not connected. Daily backup runs only while this app is open and Drive is connected.</div>';
+ anchor.parentElement?.appendChild(box);
+}
+if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',skmDriveMountUI);else skmDriveMountUI();
+setInterval(()=>{if(skmDriveReady())skmDriveAutoBackup()},15*60*1000);
+
 $('restoreFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0];if(!file)return;const status=$('restoreStatus');try{if(!confirm('Restore this backup? Existing matching records will be overwritten or updated.')){e.target.value='';return}if(status)status.textContent='Restoring backup...';const data=JSON.parse(await file.text());await restoreData(data);if(status)status.textContent='Restore completed successfully.';if(!configured){liveStarted=false;await loadAll()}else alert('Restore completed. Live data will refresh automatically.');}catch(err){if(status)status.textContent='Restore failed.';alert('Restore failed: '+err.message)}finally{e.target.value=''}});
 
 window.calculatePurchaseGst=()=>{
