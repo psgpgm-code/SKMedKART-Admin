@@ -447,7 +447,6 @@ function repairLocalStockConsistency(){
   const resolveProduct=(id,name)=>{const p=productById.get(String(id||''));if(p)return p;const n=norm(name),arr=products.filter(x=>norm(x?.name)===n);return arr.length===1?arr[0]:null};
   const resolveBatch=(prod,bn,bid)=>{const byId=batchById.get(String(bid||'')),wanted=norm(bn);if(byId&&String(byId.productId||'')===String(prod?.id||'')&&(!wanted||norm(byId.batchNumber||byId.batch)===wanted))return byId;if(!wanted)return null;const arr=batchByKey.get(batchKey(prod?.id,wanted))||[];return arr.length===1?arr[0]:null};
   const purchaseQtyByBatch=new Map();
-  const stockByProduct=new Map();
   for(const pu of purchases){const q=Math.max(0,Number(pu?.qty??pu?.quantity??0));if(!q)continue;const prod=resolveProduct(pu?.productId||pu?.productID,pu?.productName||pu?.medicine||pu?.name);if(!prod)continue;const b=resolveBatch(prod,pu?.batchNumber||pu?.batch,pu?.batchId||'');if(!b)continue;const bid=String(b.id);purchaseQtyByBatch.set(bid,(purchaseQtyByBatch.get(bid)||0)+q)}
   const saleQtyByBatch=new Map(),seenBills=new Set();
   for(const bill of bills){const billId=String(bill?.id||'');if(!billId||seenBills.has(billId)||bill?.returned)continue;seenBills.add(billId);for(const it of (bill?.items||[])){const q=Math.max(0,Number(it?.qty??it?.quantity??0));if(!q)continue;const prod=resolveProduct(it?.productId,it?.name||it?.productName||it?.medicine);if(!prod)continue;const b=resolveBatch(prod,it?.batchNumber||it?.batch,it?.batchId||'');if(!b)continue;const bid=String(b.id);saleQtyByBatch.set(bid,(saleQtyByBatch.get(bid)||0)+q)}}
@@ -475,14 +474,14 @@ async function migrateVerifiedSnapshotOnce(){
   const data=await decodeVerifiedSnapshot(),c=data?.collections||{};
   const mergeBaseline=(current,baseline)=>{const cur=Array.isArray(current)?current:[],base=Array.isArray(baseline)?baseline:[];const map=new Map();for(const x of base){const id=String(x?.id||'');if(id)map.set(id,x)}for(const x of cur){const id=String(x?.id||'');if(id&&!map.has(id))map.set(id,x)}return [...map.values()]};
   products=mergeBaseline(get('products',[]),c.products);
-  purchases=mergeBaseline(get('purchases',[]),c.purchases);
+  purchases=mergeBaseline(get('purchases',[]),c.purchases).filter(x=>x?.recovered!==true);
   bills=mergeBaseline(get('bills',[]),c.bills);
   // Do NOT retain legacy synthetic batches merely because they exist in localStorage.
   // Keep verified snapshot batches plus only genuinely newer local batches that have
   // an explicit purchase entry or explicit manual opening stock. This is what removes
   // the old 2675-batch inflation without deleting real new stock.
   const baselineBatchIds=new Set((c.batches||[]).map(x=>String(x?.id||'')).filter(Boolean));
-  const localPurchases=get('purchases',[]);
+  const localPurchases=get('purchases',[]).filter(x=>x?.recovered!==true);
   const localBatchIsLegitimate=b=>{
     const bid=String(b?.id||''),pid=String(b?.productId||''),bn=normMedicineName(b?.batchNumber||b?.batch);
     if(baselineBatchIds.has(bid))return true;
@@ -505,32 +504,6 @@ async function migrateVerifiedSnapshotOnce(){
   return true;
 }
 
-async function repairRecoveredPurchaseHistoryOnce(){
-  if(configured||localStorage.getItem('skm_recovered_purchase_history_repaired_v1')==='yes')return false;
-  try{
-    const data=await decodeVerifiedSnapshot(),snapshot=Array.isArray(data?.collections?.purchases)?data.collections.purchases:[];
-    const recovered=snapshot.filter(x=>x?.recovered===true&&x?.id);
-    if(!recovered.length){localStorage.setItem('skm_recovered_purchase_history_repaired_v1','yes');return false;}
-    const current=Array.isArray(get('purchases',[]))?get('purchases',[]):[];
-    const byId=new Map(current.map(x=>[String(x?.id||''),x]).filter(x=>x[0]));
-    let changed=false;
-    for(const row of recovered){
-      const id=String(row.id),existing=byId.get(id);
-      if(existing){
-        for(const [k,v] of Object.entries(row)){
-          if((existing[k]===undefined||existing[k]===null||String(existing[k]).trim()==='')&&v!==undefined&&v!==null&&String(v).trim()!==''){
-            existing[k]=v;changed=true;
-          }
-        }
-      }else{
-        byId.set(id,{...row});changed=true;
-      }
-    }
-    if(changed)set('purchases',[...byId.values()]);
-    localStorage.setItem('skm_recovered_purchase_history_repaired_v1','yes');
-    return changed;
-  }catch(e){console.warn('Recovered purchase history repair skipped:',e);return false}
-}
 async function loadAll(force=false){
  await initLargeStorage();
  await migrateLegacyV1IntoV2();
@@ -538,7 +511,6 @@ async function loadAll(force=false){
  recoverMissingLocalReminders();
  if(!configured){
    try{await migrateVerifiedSnapshotOnce()}catch(e){console.error('Verified snapshot migration failed:',e)}
-   try{await repairRecoveredPurchaseHistoryOnce()}catch(e){console.error('Recovered purchase history repair failed:',e)}
    products=get('products',[]);currentOrders=get('orders',[]);purchases=get('purchases',[]);restoreMissingPurchaseSuppliersFromKnownBackup();batches=get('batches',[]);bills=get('bills',[]);customers=get('customers',[]);reminders=loadLocalReminders();suppliers=get('suppliers',[]);
    renderAll();return
  }
@@ -836,10 +808,11 @@ function assetDataUrl(path){return fetch(path).then(r=>r.ok?r.blob():Promise.rej
 let __invoiceAssetsPromise=null;
 function invoiceAssets(){if(!__invoiceAssetsPromise)__invoiceAssetsPromise=Promise.all([assetDataUrl('./invoice-top-logo.png'),assetDataUrl('./invoice-footer-logo.jpg'),assetDataUrl('./pharmacist_signature.jpg')]).then(([topLogo,footerLogo,signature])=>({topLogo,footerLogo,signature}));return __invoiceAssetsPromise}
 function shopHeaderHtml(topLogo=''){return '<div class="invHeader"><div class="invBrand">'+(topLogo?'<img src="'+topLogo+'" class="invTopLogo" alt="Sri Krishna Medicals">':'')+'<div><div class="invShop">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram,<br>Dharmapuri District, Tamil Nadu - 636 810</div><div>Phone: <b>8300363317</b></div><div>Drug Licence No: TN/DPI/01386/2021</div><div>FSSAI Licence No: 22422039000512</div></div></div><div class="invMeta"><div class="invNo">Invoice '+esc(arguments.length>1?arguments[1]:'')+'</div></div></div>'}
-function invoiceCss(){return '<style>@page{size:A4;margin:8mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#12233f;margin:0;background:#fff}.invoicePage{width:100%;max-width:794px;margin:0 auto;border:1.5px solid #0b5aa6;padding:18px 18px 0;background:#fff}.invHeader{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #1b5f9f;padding-bottom:12px}.invBrand{display:flex;gap:12px;align-items:flex-start;font-size:13px;line-height:1.45}.invTopLogo{width:105px;height:105px;object-fit:contain}.invShop{font-size:27px;font-weight:800;color:#123f7c;margin-bottom:3px}.invMeta{min-width:245px}.invNo{background:#dff0ff;color:#123f7c;font-size:22px;font-weight:800;border-radius:8px;padding:10px 14px;text-align:center}.metaGrid{display:grid;grid-template-columns:90px minmax(0,1fr);gap:4px 7px;margin-top:9px;font-size:13px;color:#222}.metaGrid span{min-width:0;overflow-wrap:anywhere;word-break:break-word}.items{width:100%;border-collapse:collapse;margin-top:15px;font-size:12px}.items th{background:#dff0ff;color:#123f7c;font-weight:800}.items th,.items td{border:1px solid #333;padding:7px 6px}.items th:nth-child(1){width:7%}.items th:nth-child(2){width:27%}.items th:nth-child(3){width:17%}.items th:nth-child(4){width:17%}.items th:nth-child(5){width:8%}.items th:nth-child(6){width:12%}.items th:nth-child(7){width:12%}.r{text-align:right}.c{text-align:center}.bottomRow{display:flex;justify-content:space-between;gap:20px;margin-top:10px;align-items:flex-start}.totals{width:55%;font-size:14px;line-height:1.65;color:#222}.grand{background:#dff0ff;color:#123f7c;border-radius:7px;padding:5px 8px;font-size:19px;font-weight:800;margin-top:3px}.pay{font-size:14px;color:#222;margin-top:7px;line-height:1.5}.sig{width:38%;text-align:center;align-self:flex-end}.sig img{width:155px;height:78px;object-fit:contain;display:block;margin:0 auto -2px}.sigline{border-top:1px solid #333;width:180px;margin:0 auto}.siglabel{font-size:12px;color:#222;margin-top:4px}.footer{margin:10px -18px 0;border-top:2px solid #0b5aa6;background:#eef8ff;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 10px;font-size:11px;color:#124a82}.footerText{display:flex;align-items:center;gap:7px;flex:1;padding-left:6px;min-width:0;overflow:visible}.wa{font-weight:800}.footerLogo{width:150px;height:43px;object-fit:contain;border-radius:7px}.thanks{font-weight:700}.note{margin-top:2px}@media print{body{background:#fff}.invoicePage{border:0;max-width:none;padding:0}.footer{margin-top:10px}}</style>'}
+function invoiceCss(){return '<style>@page{size:A4;margin:8mm}*{box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;color:#12233f;margin:0;background:#fff}.invoicePage{width:100%;max-width:794px;margin:0 auto;border:1.5px solid #0b5aa6;padding:18px 18px 0;background:#fff}.invHeader{display:flex;justify-content:space-between;gap:16px;border-bottom:1px solid #1b5f9f;padding-bottom:12px}.invBrand{display:flex;gap:12px;align-items:flex-start;font-size:13px;line-height:1.45}.invTopLogo{width:105px;height:105px;object-fit:contain}.invShop{font-size:27px;font-weight:800;color:#123f7c;margin-bottom:3px}.invMeta{min-width:245px}.invNo{background:#dff0ff;color:#123f7c;font-size:22px;font-weight:800;border-radius:8px;padding:10px 14px;text-align:center}.metaGrid{display:grid;grid-template-columns:90px minmax(0,1fr);gap:4px 7px;margin-top:9px;font-size:13px;color:#222}.metaGrid span{min-width:0;overflow-wrap:anywhere;word-break:break-word}.items{width:100%;border-collapse:collapse;margin-top:15px;font-size:12px}.items th{background:#dff0ff;color:#123f7c;font-weight:800}.items th,.items td{border:1px solid #333;padding:7px 6px}.items th:nth-child(1){width:5%}.items th:nth-child(2){width:22%}.items th:nth-child(3){width:15%}.items th:nth-child(4){width:12%}.items th:nth-child(5){width:12%}.items th:nth-child(6){width:7%}.items th:nth-child(7){width:12%}.items th:nth-child(8){width:15%}.r{text-align:right}.c{text-align:center}.bottomRow{display:flex;justify-content:space-between;gap:20px;margin-top:10px;align-items:flex-start}.totals{width:55%;font-size:14px;line-height:1.65;color:#222}.grand{background:#dff0ff;color:#123f7c;border-radius:7px;padding:5px 8px;font-size:19px;font-weight:800;margin-top:3px}.pay{font-size:14px;color:#222;margin-top:7px;line-height:1.5}.sig{width:38%;text-align:center;align-self:flex-end}.sig img{width:155px;height:78px;object-fit:contain;display:block;margin:0 auto -2px}.sigline{border-top:1px solid #333;width:180px;margin:0 auto}.siglabel{font-size:12px;color:#222;margin-top:4px}.footer{margin:10px -18px 0;border-top:2px solid #0b5aa6;background:#eef8ff;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 10px;font-size:11px;color:#124a82}.footerText{display:flex;align-items:center;gap:7px;flex:1;padding-left:6px;min-width:0;overflow:visible}.wa{font-weight:800}.footerLogo{width:150px;height:43px;object-fit:contain;border-radius:7px}.thanks{font-weight:700}.note{margin-top:2px}@media print{body{background:#fff}.invoicePage{border:0;max-width:none;padding:0}.footer{margin-top:10px}}</style>'}
 function findBill(id){const key=String(id??'');return bills.find(b=>String(b.id??'')===key||String(b.invoiceNumber??'')===key)||null}
 window.itemManufacturer=function(i){const direct=i?.manufacturer||i?.manufacturerDetails||i?.maker||i?.makerName||'';if(direct)return direct;const p=products.find(x=>x.id===i?.productId)||{};const b=batches.find(x=>x.id===i?.batchId)||{};return p.manufacturer||p.manufacturerDetails||p.maker||p.makerName||b.manufacturer||b.manufacturerDetails||b.maker||b.makerName||''};const itemManufacturer=window.itemManufacturer;
-function buildInvoiceHtml(b,assets){const rows=(b.items||[]).map((i,n)=>'<tr><td class="c">'+(n+1)+'</td><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(window.itemManufacturer(i)||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td class="c">'+Number(i.qty||0)+'</td><td class="r">'+money(i.price)+'</td><td class="r">'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join('');return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title>'+invoiceCss()+'</head><body><div class="invoicePage"><div class="invHeader"><div class="invBrand"><img src="'+assets.topLogo+'" class="invTopLogo"><div><div class="invShop">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram,<br>Dharmapuri District, Tamil Nadu - 636 810</div><div>Phone: <b>8300363317</b></div><div>Drug Licence No: TN/DPI/01386/2021</div><div>FSSAI Licence No: 22422039000512</div></div></div><div class="invMeta"><div class="invNo">Invoice '+esc(b.invoiceNumber)+'</div><div class="metaGrid"><b>Date</b><span>'+esc(b.billDate||'-')+'</span><b>Customer</b><span>'+esc(b.customerName||'Walk-in Customer')+'</span><b>Mobile</b><span>'+esc(b.mobile||'-')+'</span><b>Prescribed By</b><span>'+esc(b.doctor||'-')+'</span></div></div></div><table class="items"><thead><tr><th>S.No</th><th>Medicine</th><th>Manufacturer</th><th>Batch</th><th>Qty</th><th>Rate (₹)</th><th>Amount (₹)</th></tr></thead><tbody>'+rows+'</tbody></table><div class="bottomRow"><div class="totals"><div><b>Subtotal</b> : '+money(b.subtotal)+'</div><div><b>Discount</b> : '+money(b.discount)+'</div><div><b>GST</b> : '+money(b.gst)+'</div><div class="grand"><b>Grand Total</b> : '+money(b.grandTotal)+'</div><div class="pay"><b>Payment Mode</b> : '+esc(b.paymentMode||'-')+'<br><span class="note"><b>Note</b> : '+esc(b.note||'-')+'</span></div></div><div class="sig"><img src="'+assets.signature+'" alt="Pharmacist Signature"><div class="sigline"></div><div class="siglabel">Pharmacist Signature</div></div></div><div class="footer"><div class="footerText"><span class="thanks">Thank you for purchasing</span><span>|</span><span>Order through WhatsApp by using <b class="wa">SKMedKART app</b></span></div><img src="'+assets.footerLogo+'" class="footerLogo" alt="SKMedKART"></div></div></body></html>'}
+function invoiceItemExpiry(i){if(i?.expiryDate)return i.expiryDate;const batch=batches.find(x=>String(x.id)===String(i?.batchId)||(String(x.productId)===String(i?.productId)&&String(x.batchNumber||'')===String(i?.batchNumber||'')));if(batch?.expiryDate)return batch.expiryDate;const purchase=purchases.find(x=>String(x.productId||'')===String(i?.productId||'')&&String(x.batchNumber||x.batch||'')===String(i?.batchNumber||''));return purchase?.expiryDate||'-'}
+function buildInvoiceHtml(b,assets){const rows=(b.items||[]).map((i,n)=>'<tr><td class="c">'+(n+1)+'</td><td>'+esc(i.name||i.productName||'-')+'</td><td>'+esc(window.itemManufacturer(i)||'-')+'</td><td>'+esc(i.batchNumber||'-')+'</td><td>'+esc(invoiceItemExpiry(i))+'</td><td class="c">'+Number(i.qty||0)+'</td><td class="r">'+money(i.price)+'</td><td class="r">'+money(Number(i.qty||0)*Number(i.price||0))+'</td></tr>').join('');return '<!doctype html><html><head><meta charset="utf-8"><title>'+esc(b.invoiceNumber)+'</title>'+invoiceCss()+'</head><body><div class="invoicePage"><div class="invHeader"><div class="invBrand"><img src="'+assets.topLogo+'" class="invTopLogo"><div><div class="invShop">Sri Krishna Medicals</div><div>Kaveri Road, Pennagaram,<br>Dharmapuri District, Tamil Nadu - 636 810</div><div>Phone: <b>8300363317</b></div><div>Drug Licence No: TN/DPI/01386/2021</div><div>FSSAI Licence No: 22422039000512</div></div></div><div class="invMeta"><div class="invNo">Invoice '+esc(b.invoiceNumber)+'</div><div class="metaGrid"><b>Date</b><span>'+esc(b.billDate||'-')+'</span><b>Customer</b><span>'+esc(b.customerName||'Walk-in Customer')+'</span><b>Mobile</b><span>'+esc(b.mobile||'-')+'</span><b>Prescribed By</b><span>'+esc(b.doctor||'-')+'</span></div></div></div><table class="items"><thead><tr><th>S.No</th><th>Medicine</th><th>Manufacturer</th><th>Batch</th><th>Expiry Date</th><th>Qty</th><th>Rate (₹)</th><th>Amount (₹)</th></tr></thead><tbody>'+rows+'</tbody></table><div class="bottomRow"><div class="totals"><div><b>Subtotal</b> : '+money(b.subtotal)+'</div><div><b>Discount</b> : '+money(b.discount)+'</div><div><b>GST</b> : '+money(b.gst)+'</div><div class="grand"><b>Grand Total</b> : '+money(b.grandTotal)+'</div><div class="pay"><b>Payment Mode</b> : '+esc(b.paymentMode||'-')+'<br><span class="note"><b>Note</b> : '+esc(b.note||'-')+'</span></div></div><div class="sig"><img src="'+assets.signature+'" alt="Pharmacist Signature"><div class="sigline"></div><div class="siglabel">Pharmacist Signature</div></div></div><div class="footer"><div class="footerText"><span class="thanks">Thank you for purchasing</span><span>|</span><span>Order through WhatsApp by using <b class="wa">SKMedKART app</b></span></div><img src="'+assets.footerLogo+'" class="footerLogo" alt="SKMedKART"></div></div></body></html>'}
 async function billHtml(b){const assets=await invoiceAssets();return buildInvoiceHtml(b,assets)}
 window.printBill=async id=>{const b=typeof id==='object'?id:findBill(id);if(!b)return alert('Bill not found.');const html=await billHtml(b);let frame=document.getElementById('printFrame');if(frame)frame.remove();frame=document.createElement('iframe');frame.id='printFrame';frame.style.position='fixed';frame.style.width='1px';frame.style.height='1px';frame.style.border='0';frame.style.opacity='0';document.body.appendChild(frame);const docx=frame.contentDocument||frame.contentWindow.document;docx.open();docx.write(html);docx.close();frame.onload=()=>setTimeout(()=>{try{frame.contentWindow.focus();frame.contentWindow.print()}catch(e){const w=window.open('','_blank');if(!w)return alert('Please allow popups for printing.');w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),300)}},200)};
 async function pdfBlob(b){
@@ -873,17 +846,17 @@ async function pdfBlob(b){
     ctx.font='18px Arial';ctx.fillText(': '+esc2(m[1]),985,yy);
   });
   ctx.strokeStyle='#1b5f9f';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(35,230);ctx.lineTo(1205,230);ctx.stroke();
-  const x=[35,105,420,600,790,855,1000,1205], top=250, headH=42, rowH=48;
+  const x=[35,100,340,485,625,765,835,1000,1205], top=250, headH=42, rowH=48;
   ctx.fillStyle='#dff0ff';ctx.fillRect(x[0],top,x[7]-x[0],headH);
   ctx.strokeStyle='#333';ctx.lineWidth=1;ctx.strokeRect(x[0],top,x[7]-x[0],headH);
-  ['S.No','Medicine','Manufacturer','Batch','Qty','Rate (₹)','Amount (₹)'].forEach((h,i)=>{ctx.fillStyle='#123f7c';ctx.font='700 16px Arial';ctx.fillText(h,x[i]+8,top+27);});
+  ['S.No','Medicine','Manufacturer','Batch','Expiry Date','Qty','Rate (₹)','Amount (₹)'].forEach((h,i)=>{ctx.fillStyle='#123f7c';ctx.font='700 15px Arial';ctx.fillText(h,x[i]+6,top+27);});
   let yy=top+headH;
   (b.items||[]).forEach((it,n)=>{
     ctx.strokeStyle='#333';ctx.strokeRect(x[0],yy,x[7]-x[0],rowH);
     for(let j=1;j<x.length-1;j++){ctx.beginPath();ctx.moveTo(x[j],yy);ctx.lineTo(x[j],yy+rowH);ctx.stroke();}
     const man=window.itemManufacturer?window.itemManufacturer(it):((it.manufacturer||it.manufacturerDetails)||'-');
-    const vals=[String(n+1),esc2(it.name||it.productName||'-'),esc2(man||'-'),esc2(it.batchNumber||'-'),String(it.qty||0),Number(it.price||0).toFixed(2),Number((it.qty||0)*(it.price||0)).toFixed(2)];
-    vals.forEach((v,j)=>{ctx.fillStyle='#222';ctx.font='16px Arial';ctx.fillText(v.slice(0,j===1?34:20),x[j]+8,yy+29);});
+    const vals=[String(n+1),esc2(it.name||it.productName||'-'),esc2(man||'-'),esc2(it.batchNumber||'-'),esc2(invoiceItemExpiry(it)),String(it.qty||0),Number(it.price||0).toFixed(2),Number((it.qty||0)*(it.price||0)).toFixed(2)];
+    vals.forEach((v,j)=>{ctx.fillStyle='#222';ctx.font='15px Arial';ctx.fillText(v.slice(0,j===1?28: j===2?18:14),x[j]+6,yy+29);});
     yy+=rowH;
   });
   const totalY=Math.min(Math.max(yy+45,760),1300);
@@ -1022,23 +995,6 @@ window.cancelPurchaseEdit=()=>{
   loadPurchaseHeaderDefaults();
   renderPurchases();
 };
-function findBatchForPurchase(purchase){
-  if(!purchase)return null;
-  const productId=String(purchase.productId||purchase.productID||'');
-  const batchNumber=String(purchase.batchNumber||purchase.batch||'').trim();
-  const explicitId=String(purchase.batchId||'').trim();
-  if(explicitId){
-    const exact=batches.find(x=>String(x.id)===explicitId);
-    if(exact)return exact;
-  }
-  const conventional=productId&&batchNumber?productId+'__'+batchNumber:'';
-  if(conventional){
-    const exact=batches.find(x=>String(x.id)===conventional);
-    if(exact)return exact;
-  }
-  const candidates=batches.filter(x=>String(x.productId||'')===productId&&String(x.batchNumber||x.batch||'').trim().toLowerCase()===batchNumber.toLowerCase());
-  return candidates.length===1?candidates[0]:null;
-}
 window.editPurchase=async id=>{
   const purchase=purchases.find(x=>String(x.id)===String(id)); if(!purchase)return alert('Purchase record not found.');
   const product=products.find(x=>String(x.id)===String(purchase.productId)); if(!product)return alert('Original medicine/product not found.');
@@ -1081,8 +1037,7 @@ window.savePurchase=async()=>{
       if(purchaseReturnRowsForPurchase(purchase.id).length)return alert('This purchase has a supplier return recorded. For stock safety, it cannot be edited. Create a new purchase entry for any correction.');
       const originalProduct=products.find(x=>String(x.id)===String(purchase.productId)); if(!originalProduct)return alert('Original medicine/product not found.');
       if(String(product?.id||'')!==String(purchase.productId))return alert('For stock safety, the medicine cannot be changed while editing a purchase. Create a new purchase entry for another medicine.');
-      const oldBatchNumber=String(purchase.batchNumber||purchase.batch||''),oldBatch=findBatchForPurchase(purchase); if(!oldBatch)return alert('Original batch not found. Refresh data before editing.');
-      const oldBid=String(oldBatch.id),newBid=String(purchase.productId)+'__'+batchNumber,newStockMovements=get('stockMovements',[]);
+      const oldBatchNumber=String(purchase.batchNumber||purchase.batch||''),oldBid=String(purchase.productId)+'__'+oldBatchNumber,newBid=String(purchase.productId)+'__'+batchNumber,newStockMovements=get('stockMovements',[]),oldBatch=batches.find(x=>String(x.id)===oldBid); if(!oldBatch)return alert('Original batch not found. Refresh data before editing.');
       const batchChanged=oldBatchNumber!==batchNumber;
       const nonPurchaseMovements=newStockMovements.filter(m=>String(m.batchId||'')===oldBid&&String(m.id||'')!==String(purchase.id+'_SM')&&String(m.type||'').toUpperCase()!=='PURCHASE');
       const otherPurchases=purchases.filter(x=>String(x.id)!==String(purchase.id)&&String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber); const otherOldPurchases=purchases.filter(x=>String(x.id)!==String(purchase.id)&&String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===oldBatchNumber);
@@ -1102,7 +1057,7 @@ window.savePurchase=async()=>{
         // purchase's commercial data. Batch keeps only operational/display values.
         Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
       }
-      const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,batchId:newBid,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
+      const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
       const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id)); if(pi>=0)purchases[pi]=updated;
       const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:newBid,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
       originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer});
@@ -1117,7 +1072,7 @@ window.savePurchase=async()=>{
       renderAll(); alert('Purchase updated successfully. Stock was adjusted safely.'); return;
     }
     const productId=product?.id||('product_'+uid());
-    const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,batchId:productId+'__'+batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
+    const purchase={id:'PU'+Date.now()+Math.random().toString(36).slice(2,8),productId,productName:product?.name||typedName,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(product?.price||0),minQty};
     if(!product){product={id:productId,name:typedName,cat:purchase.category,category:purchase.category,schedule:purchase.schedule,manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails,price:purchase.sellingPrice,stock:0,lowStockLevel:minQty,active:true};products.push(product)} else {product.cat=purchase.category;product.category=purchase.category;product.lowStockLevel=minQty;if(purchase.schedule)product.schedule=purchase.schedule;if(purchase.manufacturer)Object.assign(product,{manufacturer:purchase.manufacturer,manufacturerDetails:purchase.manufacturerDetails})}
     let b=batches.find(x=>x.productId===productId&&x.batchNumber===batchNumber); if(b){
       b.stock=Number(b.stock||0)+qty;b.expiryDate=expiryDate;b.category=purchase.category;b.manufacturer=purchase.manufacturer;b.manufacturerDetails=purchase.manufacturerDetails;b.cat=purchase.category;b.schedule=purchase.schedule;b.sellingPrice=purchase.sellingPrice;b.mrp=purchase.mrp;
@@ -1250,7 +1205,7 @@ window.deletePurchase=async id=>{
  const qty=Number(purchase.qty||0);
  if(!qty)return alert('This purchase has no valid quantity to delete.');
  if(purchaseReturnRowsForPurchase(purchase.id).length)return alert('This purchase has a supplier return recorded. For stock safety, it cannot be deleted.');
- const batch=findBatchForPurchase(purchase);
+ const batch=batches.find(x=>String(x.id)===String(purchase.batchId||'') || (String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber));
  if(!confirm('Delete this purchase entry?\n\nMedicine: '+productName+'\nBatch: '+(batchNumber||'-')+'\nQty: '+qty+'\n\nThe purchase record and its stock contribution will be removed. This cannot be undone.'))return;
  try{
    const allMoves=get('stockMovements',[]);
@@ -1571,91 +1526,19 @@ async function reportInvoiceCanvas(b,assets){
   return canvas;
 }
 async function reportPdfBlob(){
-  const r=window.__reportRange;
-  if(!r?.from||!r?.to)throw new Error('Select a report period first.');
-  const rows=r.rows||[];
-  if(!rows.length)throw new Error('No bills found for the selected period.');
-
-  // Memory-safe report PDF: keep only compact text/vector content in memory.
-  // The previous implementation retained a full canvas and JPEG for every bill,
-  // which can exhaust Android WebView memory on large report ranges.
-  const enc=new TextEncoder();
-  const latin=v=>String(v??'').replace(/[^\x20-\x7E]/g,'?');
-  const pdfText=v=>latin(v).replace(/\\/g,'\\\\').replace(/\(/g,'\\(').replace(/\)/g,'\\)');
-  const moneyPdf=v=>'INR '+Number(v||0).toFixed(2);
-  const pageW=595,pageH=842,margin=34,lineH=13;
-  const pages=[];
-  let page=[],y=pageH-margin;
-
-  const addLine=(txt,size=9,bold=false)=>{
-    if(y<52){pages.push(page.join('\\n'));page=[];y=pageH-margin;}
-    page.push(`BT /${bold?'F2':'F1'} ${size} Tf ${margin} ${y.toFixed(1)} Td (${pdfText(txt)}) Tj ET`);
-    y-=lineH;
-  };
-  const addRule=()=>{
-    if(y<52){pages.push(page.join('\\n'));page=[];y=pageH-margin;}
-    page.push(`0.75 w ${margin} ${y.toFixed(1)} m ${pageW-margin} ${y.toFixed(1)} l S`);
-    y-=8;
-  };
-
-  addLine('Sri Krishna Medicals - Date-wise / Monthly Sales Report',15,true);
-  addLine('Report period: '+r.from+' to '+r.to,10,true);
-  addLine('Total Sales: '+moneyPdf(r.sales)+'    Purchase Value: '+moneyPdf(r.purchaseCost)+'    Gross Margin: '+moneyPdf(r.gross),10,true);
-  addLine('Bills: '+rows.length,10,true);
-  addRule();
-  addLine('Invoice        Date          Customer                         Total        Payment',9,true);
-  addRule();
-
-  for(const b of rows){
-    const inv=String(b.invoiceNumber||'-').slice(0,16).padEnd(16);
-    const date=reportDateValue(b.billDate||b.date||b.createdAt).slice(0,10).padEnd(12);
-    const customer=latin(b.customerName||'Walk-in Customer').slice(0,30).padEnd(30);
-    const total=moneyPdf(b.grandTotal).padEnd(14);
-    const pay=latin(b.paymentMode||'-').slice(0,12);
-    addLine(`${inv} ${date} ${customer} ${total} ${pay}`,8,false);
-  }
-  if(page.length)pages.push(page.join('\\n'));
-
-  const objects=[];
-  const put=(n,body)=>{objects[n]=body;};
-  put(1,'<< /Type /Catalog /Pages 2 0 R >>');
-  const kids=[];
-  const font1=3,font2=4;
-  put(font1,'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>');
-  put(font2,'<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>');
-  const firstPageObj=5;
-  pages.forEach((content,i)=>{
-    const pageNo=firstPageObj+i*2,contentNo=pageNo+1;
-    kids.push(pageNo+' 0 R');
-    const bytes=enc.encode(content);
-    put(pageNo,'<< /Type /Page /Parent 2 0 R /MediaBox [0 0 '+pageW+' '+pageH+'] /Resources << /Font << /F1 '+font1+' 0 R /F2 '+font2+' 0 R >> >> /Contents '+contentNo+' 0 R >>');
-    put(contentNo,{stream:bytes});
-  });
-  put(2,'<< /Type /Pages /Kids ['+kids.join(' ')+'] /Count '+pages.length+' >>');
-
-  const chunks=[],offsets=new Array(objects.length).fill(0),header=enc.encode('%PDF-1.4\\n');
-  chunks.push(header);
-  let pos=header.length;
-  const addObj=(n,body)=>{
-    offsets[n]=pos;
-    const head=enc.encode(n+' 0 obj\\n');
-    chunks.push(head);pos+=head.length;
-    if(body&&body.stream){
-      const dict=enc.encode('<< /Length '+body.stream.length+' >>\\nstream\\n');
-      const tail=enc.encode('\\nendstream\\nendobj\\n');
-      chunks.push(dict,body.stream,tail);pos+=dict.length+body.stream.length+tail.length;
-    }else{
-      const data=enc.encode(String(body)+'\\nendobj\\n');
-      chunks.push(data);pos+=data.length;
-    }
-  };
-  for(let n=1;n<objects.length;n++)addObj(n,objects[n]);
-  const xref=pos;
-  let x='xref\\n0 '+objects.length+'\\n0000000000 65535 f \\n';
-  for(let n=1;n<objects.length;n++)x+=String(offsets[n]).padStart(10,'0')+' 00000 n \\n';
-  x+='trailer\\n<< /Size '+objects.length+' /Root 1 0 R >>\\nstartxref\\n'+xref+'\\n%%EOF';
-  chunks.push(enc.encode(x));
-  return new Blob(chunks,{type:'application/pdf'});
+  const r=window.__reportRange;if(!r?.from||!r?.to)throw new Error('Select a report period first.');
+  const rows=r.rows||[];const assets=await invoiceAssets();const canvases=[];
+  for(const b of rows)canvases.push(await reportInvoiceCanvas(b,assets));
+  if(!canvases.length)throw new Error('No bills found for the selected period.');
+  const W=1240,H=1754,enc=new TextEncoder(),B=x=>enc.encode(String(x)),images=[];
+  for(const canvas of canvases){const raw=atob(canvas.toDataURL('image/jpeg',0.92).split(',')[1]);const u=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);images.push(u)}
+  const pageCount=images.length,basePage=3,baseImg=basePage+pageCount,baseContent=baseImg+pageCount,all=[null];const put=(n,v)=>{while(all.length<=n)all.push(null);all[n]=v};
+  put(1,B('<< /Type /Catalog /Pages 2 0 R >>'));const kids=[];for(let i=0;i<pageCount;i++)kids.push((basePage+i)+' 0 R');put(2,B('<< /Type /Pages /Kids ['+kids.join(' ')+'] /Count '+pageCount+' >>'));
+  for(let i=0;i<pageCount;i++){const pageNo=basePage+i,imgNo=baseImg+i,contNo=baseContent+i;put(pageNo,B('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 '+imgNo+' 0 R >> >> /Contents '+contNo+' 0 R >>'));const content='q 595 0 0 842 0 0 cm /Im1 Do Q';put(contNo,B('<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream'));put(imgNo,images[i])}
+  const chunks=[B('%PDF-1.4\n')],offs=new Array(all.length).fill(0);let pos=chunks[0].length;
+  const add=(n,parts)=>{offs[n]=pos;const a=[B(n+' 0 obj\n'),...parts,B('\nendobj\n')];chunks.push(...a);pos+=a.reduce((s,x)=>s+x.length,0)};
+  for(let n=1;n<all.length;n++){if(n>=baseImg&&n<baseImg+pageCount){const u=all[n];add(n,[B('<< /Type /XObject /Subtype /Image /Width '+W+' /Height '+H+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+u.length+' >>\nstream\n'),u,B('\nendstream')]);}else add(n,[all[n]]);}
+  const xref=pos;let xs='xref\n0 '+all.length+'\n0000000000 65535 f \n';for(let n=1;n<all.length;n++)xs+=String(offs[n]).padStart(10,'0')+' 00000 n \n';xs+='trailer\n<< /Size '+all.length+' /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF';chunks.push(B(xs));return new Blob(chunks,{type:'application/pdf'});
 }
 window.saveDateReportPdf=async()=>{try{let r=window.__reportRange;if((!r?.from||!r?.to)&&$('reportFrom')?.value&&$('reportTo')?.value){renderReportRange($('reportFrom').value,$('reportTo').value);r=window.__reportRange}if(!r?.from||!r?.to)return alert('Select From and To dates.');const blob=await reportPdfBlob();const url=URL.createObjectURL(blob);const filename='SKMedKART-Report-'+r.from+'-to-'+r.to+'.pdf';const a=document.createElement('a');a.href=url;a.download=filename;a.rel='noopener';a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>{try{URL.revokeObjectURL(url)}catch(e){}},5000)}catch(e){alert('Could not create report PDF: '+(e?.message||String(e)))}};
 
