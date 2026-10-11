@@ -1527,11 +1527,16 @@ async function reportInvoiceCanvas(b,assets){
 }
 async function reportPdfBlob(){
   const r=window.__reportRange;if(!r?.from||!r?.to)throw new Error('Select a report period first.');
-  const rows=r.rows||[];const assets=await invoiceAssets();const canvases=[];
-  for(const b of rows)canvases.push(await reportInvoiceCanvas(b,assets));
-  if(!canvases.length)throw new Error('No bills found for the selected period.');
-  const W=1240,H=1754,enc=new TextEncoder(),B=x=>enc.encode(String(x)),images=[];
-  for(const canvas of canvases){const raw=atob(canvas.toDataURL('image/jpeg',0.92).split(',')[1]);const u=new Uint8Array(raw.length);for(let i=0;i<raw.length;i++)u[i]=raw.charCodeAt(i);images.push(u)}
+  const rows=r.rows||[];if(!rows.length)throw new Error('No bills found for the selected period.');
+  const assets=await invoiceAssets(),W=1240,H=1754,enc=new TextEncoder(),B=x=>enc.encode(String(x)),images=[];
+  // Render and compress one invoice at a time. Keeping every full-size canvas alive
+  // caused Android WebView/Chrome to run out of memory and show “Aw, Snap!”.
+  for(const b of rows){
+    const canvas=await reportInvoiceCanvas(b,assets);
+    const blob=await new Promise((resolve,reject)=>canvas.toBlob(v=>v?resolve(v):reject(new Error('Could not encode report page')), 'image/jpeg',0.72));
+    const buf=await blob.arrayBuffer();images.push(new Uint8Array(buf));
+    canvas.width=1;canvas.height=1;
+  }
   const pageCount=images.length,basePage=3,baseImg=basePage+pageCount,baseContent=baseImg+pageCount,all=[null];const put=(n,v)=>{while(all.length<=n)all.push(null);all[n]=v};
   put(1,B('<< /Type /Catalog /Pages 2 0 R >>'));const kids=[];for(let i=0;i<pageCount;i++)kids.push((basePage+i)+' 0 R');put(2,B('<< /Type /Pages /Kids ['+kids.join(' ')+'] /Count '+pageCount+' >>'));
   for(let i=0;i<pageCount;i++){const pageNo=basePage+i,imgNo=baseImg+i,contNo=baseContent+i;put(pageNo,B('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 '+imgNo+' 0 R >> >> /Contents '+contNo+' 0 R >>'));const content='q 595 0 0 842 0 0 cm /Im1 Do Q';put(contNo,B('<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream'));put(imgNo,images[i])}
