@@ -1558,7 +1558,7 @@ async function reportPdfBlob(){
   // Insert the two root objects at the beginning of the object list and recompute offsets.
   const bodyChunks=chunks.slice(1);const bodyLength=bodyChunks.reduce((n,b)=>n+b.length,0);
   const prefix=[B('1 0 obj\n'),catalog,B('\nendobj\n'),B('2 0 obj\n'),B(kids),B('\nendobj\n')];
-  const rebuilt=[B('%PDF-1.4\n'),...prefix,...bodyChunks];let cursor=rebuilt[0].length;const newOffsets=[0,rebuilt[0].length,rebuilt[0].length+prefix.slice(0,3).reduce((n,b)=>n+b.length,0)];
+  const rebuilt=[B('%PDF-1.4\n'),...prefix,...bodyChunks];let cursor=rebuilt[0].length;const newOffsets=[0,rebuilt[0].length,rebuilt[0].length+prefix.slice(0,4).reduce((n,b)=>n+b.length,0)];
   // Object 1 and 2 offsets, followed by all subsequently emitted objects in their original order.
   for(let i=3;i<objectNo;i++){
     const original=offsets[i];newOffsets[i]=original+prefix.reduce((n,b)=>n+b.length,0);
