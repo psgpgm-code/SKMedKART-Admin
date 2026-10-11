@@ -1491,9 +1491,11 @@ async function reportInvoiceHtml(){
 window.printDateReport=async()=>{try{let r=window.__reportRange;if((!r?.from||!r?.to)&&$('reportFrom')?.value&&$('reportTo')?.value){renderReportRange($('reportFrom').value,$('reportTo').value);r=window.__reportRange}if(!r?.from||!r?.to)return alert('Select a report period first.');const html=await reportInvoiceHtml();const w=window.open('','_blank');if(!w)return alert('Please allow popups for printing.');w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),400)}catch(e){alert('Could not prepare report: '+(e?.message||String(e)))}};
 
 async function reportInvoiceCanvas(b,assets){
-  const W=1240,H=1754;
-  const canvas=document.createElement('canvas');canvas.width=W;canvas.height=H;
-  const ctx=canvas.getContext('2d');
+  const W=1240,H=1754,OUT_W=900,OUT_H=1273;
+  const canvas=document.createElement('canvas');canvas.width=OUT_W;canvas.height=OUT_H;
+  const ctx=canvas.getContext('2d',{alpha:false});
+  if(!ctx)throw new Error('PDF canvas is unavailable.');
+  ctx.scale(OUT_W/W,OUT_H/H);
   ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);
   const img=src=>new Promise((res,rej)=>{const im=new Image();im.onload=()=>res(im);im.onerror=()=>rej(new Error('Could not load invoice image'));im.src=src});
   const [topLogo,footerLogo,signature]=await Promise.all([img(assets.topLogo),img(assets.footerLogo),img(assets.signature)]);
@@ -1526,26 +1528,47 @@ async function reportInvoiceCanvas(b,assets){
   return canvas;
 }
 async function reportPdfBlob(){
-  const r=window.__reportRange;if(!r?.from||!r?.to)throw new Error('Select a report period first.');
-  const rows=r.rows||[];if(!rows.length)throw new Error('No bills found for the selected period.');
-  const assets=await invoiceAssets(),W=1240,H=1754,enc=new TextEncoder(),B=x=>enc.encode(String(x)),images=[];
-  // Render and compress one invoice at a time. Keeping every full-size canvas alive
-  // caused Android WebView/Chrome to run out of memory and show “Aw, Snap!”.
-  for(const b of rows){
-    const canvas=await reportInvoiceCanvas(b,assets);
-    const blob=await new Promise((resolve,reject)=>canvas.toBlob(v=>v?resolve(v):reject(new Error('Could not encode report page')), 'image/jpeg',0.72));
-    const buf=await blob.arrayBuffer();images.push(new Uint8Array(buf));
+  const r=window.__reportRange;
+  if(!r?.from||!r?.to)throw new Error('Select a report period first.');
+  const rows=r.rows||[];
+  if(!rows.length)throw new Error('No bills found for the selected period.');
+  const assets=await invoiceAssets();
+  const W=900,H=1273,enc=new TextEncoder(),B=x=>enc.encode(String(x));
+  const chunks=[B('%PDF-1.4\n')];let pos=chunks[0].length;const offsets=[0];let objectNo=1;
+  const addObject=(parts)=>{offsets[objectNo]=pos;const arr=[B(objectNo+' 0 obj\n'),...parts,B('\nendobj\n')];for(const a of arr){chunks.push(a);pos+=a.length}return objectNo++};
+  const catalogNo=1,pagesNo=2;objectNo=3;offsets[1]=0;offsets[2]=0;
+  const pageRefs=[];
+  // Process one bill at a time. Never keep all canvases and image buffers in memory together.
+  for(let i=0;i<rows.length;i++){
+    const canvas=await reportInvoiceCanvas(rows[i],assets);
+    let dataUrl;
+    try{dataUrl=canvas.toDataURL('image/jpeg',0.72)}catch(e){canvas.width=1;canvas.height=1;throw new Error('Could not encode report page. Try a shorter date range.');}
+    const comma=dataUrl.indexOf(',');const raw=atob(dataUrl.slice(comma+1));const imageBytes=new Uint8Array(raw.length);for(let j=0;j<raw.length;j++)imageBytes[j]=raw.charCodeAt(j);
     canvas.width=1;canvas.height=1;
+    const imageNo=addObject([B('<< /Type /XObject /Subtype /Image /Width '+W+' /Height '+H+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+imageBytes.length+' >>\nstream\n'),imageBytes,B('\nendstream')]);
+    const content='q 595 0 0 842 0 0 cm /Im1 Do Q';
+    const contentNo=addObject([B('<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream')]);
+    const pageNo=addObject([B('<< /Type /Page /Parent '+pagesNo+' 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 '+imageNo+' 0 R >> >> /Contents '+contentNo+' 0 R >>')]);
+    pageRefs.push(pageNo+' 0 R');
+    // Release per-page image memory as soon as its bytes have been appended to the PDF chunks.
   }
-  const pageCount=images.length,basePage=3,baseImg=basePage+pageCount,baseContent=baseImg+pageCount,all=[null];const put=(n,v)=>{while(all.length<=n)all.push(null);all[n]=v};
-  put(1,B('<< /Type /Catalog /Pages 2 0 R >>'));const kids=[];for(let i=0;i<pageCount;i++)kids.push((basePage+i)+' 0 R');put(2,B('<< /Type /Pages /Kids ['+kids.join(' ')+'] /Count '+pageCount+' >>'));
-  for(let i=0;i<pageCount;i++){const pageNo=basePage+i,imgNo=baseImg+i,contNo=baseContent+i;put(pageNo,B('<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 '+imgNo+' 0 R >> >> /Contents '+contNo+' 0 R >>'));const content='q 595 0 0 842 0 0 cm /Im1 Do Q';put(contNo,B('<< /Length '+content.length+' >>\nstream\n'+content+'\nendstream'));put(imgNo,images[i])}
-  const chunks=[B('%PDF-1.4\n')],offs=new Array(all.length).fill(0);let pos=chunks[0].length;
-  const add=(n,parts)=>{offs[n]=pos;const a=[B(n+' 0 obj\n'),...parts,B('\nendobj\n')];chunks.push(...a);pos+=a.reduce((s,x)=>s+x.length,0)};
-  for(let n=1;n<all.length;n++){if(n>=baseImg&&n<baseImg+pageCount){const u=all[n];add(n,[B('<< /Type /XObject /Subtype /Image /Width '+W+' /Height '+H+' /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length '+u.length+' >>\nstream\n'),u,B('\nendstream')]);}else add(n,[all[n]]);}
-  const xref=pos;let xs='xref\n0 '+all.length+'\n0000000000 65535 f \n';for(let n=1;n<all.length;n++)xs+=String(offs[n]).padStart(10,'0')+' 00000 n \n';xs+='trailer\n<< /Size '+all.length+' /Root 1 0 R >>\nstartxref\n'+xref+'\n%%EOF';chunks.push(B(xs));return new Blob(chunks,{type:'application/pdf'});
+  // Catalog and page tree are written after page objects; PDF object references may point forward.
+  const catalog=B('<< /Type /Catalog /Pages '+pagesNo+' 0 R >>');
+  const kids='<< /Type /Pages /Kids ['+pageRefs.join(' ')+'] /Count '+pageRefs.length+' >>';
+  // Insert the two root objects at the beginning of the object list and recompute offsets.
+  const bodyChunks=chunks.slice(1);const bodyLength=bodyChunks.reduce((n,b)=>n+b.length,0);
+  const prefix=[B('1 0 obj\n'),catalog,B('\nendobj\n'),B('2 0 obj\n'),B(kids),B('\nendobj\n')];
+  const rebuilt=[B('%PDF-1.4\n'),...prefix,...bodyChunks];let cursor=rebuilt[0].length;const newOffsets=[0,rebuilt[0].length,rebuilt[0].length+prefix.slice(0,3).reduce((n,b)=>n+b.length,0)];
+  // Object 1 and 2 offsets, followed by all subsequently emitted objects in their original order.
+  for(let i=3;i<objectNo;i++){
+    const original=offsets[i];newOffsets[i]=original+prefix.reduce((n,b)=>n+b.length,0);
+  }
+  cursor=rebuilt.reduce((n,b)=>n+b.length,0);let xref='xref\n0 '+objectNo+'\n0000000000 65535 f \n';
+  for(let i=1;i<objectNo;i++)xref+=String(newOffsets[i]||0).padStart(10,'0')+' 00000 n \n';
+  xref+='trailer\n<< /Size '+objectNo+' /Root 1 0 R >>\nstartxref\n'+cursor+'\n%%EOF';rebuilt.push(B(xref));
+  return new Blob(rebuilt,{type:'application/pdf'});
 }
-window.saveDateReportPdf=async()=>{try{let r=window.__reportRange;if((!r?.from||!r?.to)&&$('reportFrom')?.value&&$('reportTo')?.value){renderReportRange($('reportFrom').value,$('reportTo').value);r=window.__reportRange}if(!r?.from||!r?.to)return alert('Select From and To dates.');const blob=await reportPdfBlob();const url=URL.createObjectURL(blob);const filename='SKMedKART-Report-'+r.from+'-to-'+r.to+'.pdf';const a=document.createElement('a');a.href=url;a.download=filename;a.rel='noopener';a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>{try{URL.revokeObjectURL(url)}catch(e){}},5000)}catch(e){alert('Could not create report PDF: '+(e?.message||String(e)))}};
+window.saveDateReportPdf=async()=>{try{let r=window.__reportRange;if((!r?.from||!r?.to)&&$('reportFrom')?.value&&$('reportTo')?.value){renderReportRange($('reportFrom').value,$('reportTo').value);r=window.__reportRange}if(!r?.from||!r?.to)return alert('Select From and To dates.');const blob=await reportPdfBlob();const url=URL.createObjectURL(blob);const filename='SKMedKART-Report-'+r.from+'-to-'+r.to+'.pdf';const a=document.createElement('a');a.href=url;a.download=filename;a.rel='noopener';a.style.display='none';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>{try{URL.revokeObjectURL(url)}catch(e){}},60000)}catch(e){alert('Could not create report PDF: '+(e?.message||String(e)))}};
 
 function scheduleValue(p){return String(p?.schedule||p?.scheduleClass||'').toUpperCase().replace('SCHEDULE ','');}
 function scheduleProductId(item){return item?.productId||item?.productID||'';}
