@@ -1,3 +1,4 @@
+// SUPABASE-CATALOG-TEST BRANCH PATCH: Purchase Edit legacy batch ID resolution.
 // V5.9.74 CANONICAL PURCHASE → SALES → REMAINING STOCK FIX
 // V5.9.77 ROUND-OFF UI FIX: compact control placed below totals; example text removed.
 
@@ -614,7 +615,7 @@ window.checkMedicineAvailability=()=>{
 };
 
 function expiryStatus(b){const x=t(b.expiryDate),now=Date.now(),soon=now+60*864e5;return !x?'NO EXPIRY':x<now?'EXPIRED':x<=soon?'NEAR EXPIRY':'OK'}
-function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>Number(b?.stock||0)>0&&['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc){const keys=new Set(batches.map(b=>String(b?.productId||'')+'|'+String(b?.batchNumber||b?.batch||'').trim().toUpperCase()).filter(x=>!x.startsWith('|')));bc.textContent=keys.size;}const effectiveStockById=new Map(products.map(p=>[String(p.id),Math.max(0,effectiveMedicineStock(p))]));const zeroAlerts=zero;const lowAlerts=low.filter(p=>!zeroAlerts.includes(p));const catKey=p=>{const raw=String(p?.cat||p?.category||'Human Medicines').trim();const l=raw.toLowerCase();if(l.includes('veterinary'))return 'Veterinary';if(l.includes('human'))return 'Human Medicines';if(l.includes('baby'))return 'Baby Care';if(l.includes('pet'))return 'Pet Products';if(l.includes('health'))return 'Health';if(l.includes('device'))return 'Devices';if(l.includes('cosmetic'))return 'Cosmetics';return raw||'Other';};const catLabel={"Human Medicines":"💊 HUMAN MEDICINES","Veterinary":"🐾 VETERINARY MEDICINES","Baby Care":"👶 BABY PRODUCTS","Pet Products":"🐶 PET PRODUCTS","Health":"🩺 HEALTH CARE","Devices":"🩹 MEDICAL DEVICES","Cosmetics":"💄 COSMETICS",Other:"📦 OTHER"};const groups={};[...zeroAlerts.map(p=>({...p,__kind:'OUT OF STOCK'})),...lowAlerts.map(p=>({...p,__kind:'LOW STOCK'}))].forEach(p=>{const c=catKey(p);(groups[c]||(groups[c]=[])).push(p)});const alerts=[];Object.keys(groups).sort((a,b)=>{const order=['Human Medicines','Veterinary','Baby Care','Pet Products','Health','Devices','Cosmetics','Other'];return (order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b))}).forEach(c=>{alerts.push('<div style="font-weight:800;font-size:16px;margin:12px 0 6px">'+esc(catLabel[c]||c)+'</div>');groups[c].forEach(p=>{const effective=effectiveStockById.get(String(p.id))||0;alerts.push('<div class="warning">'+esc(p.__kind+': '+p.name+' ('+effective+')')+'</div>')})});exp.forEach(b=>alerts.push('<div class="warning">'+esc(expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)+'</div>'));$('alerts').innerHTML=alerts.join('')||'<div class="good">No urgent stock or expiry alerts.</div>';
+function renderDashboard(){const low=products.filter(p=>effectiveMedicineStock(p)<=Number(p.lowStockLevel??10)),zero=products.filter(p=>effectiveMedicineStock(p)<=0),exp=batches.filter(b=>['EXPIRED','NEAR EXPIRY'].includes(expiryStatus(b)));const sales=bills.filter(b=>!b.returned&&String(b.billDate||'')===today()).reduce((s,b)=>s+Number(b.grandTotal||0),0);$('lowCount').textContent=low.length;$('expiryCount').textContent=exp.length;$('salesCount').textContent=money(sales);const bc=$('batchCount');if(bc){const keys=new Set(batches.map(b=>String(b?.productId||'')+'|'+String(b?.batchNumber||b?.batch||'').trim().toUpperCase()).filter(x=>!x.startsWith('|')));bc.textContent=keys.size;}const effectiveStockById=new Map(products.map(p=>[String(p.id),Math.max(0,effectiveMedicineStock(p))]));const zeroAlerts=zero;const lowAlerts=low.filter(p=>!zeroAlerts.includes(p));const catKey=p=>{const raw=String(p?.cat||p?.category||'Human Medicines').trim();const l=raw.toLowerCase();if(l.includes('veterinary'))return 'Veterinary';if(l.includes('human'))return 'Human Medicines';if(l.includes('baby'))return 'Baby Care';if(l.includes('pet'))return 'Pet Products';if(l.includes('health'))return 'Health';if(l.includes('device'))return 'Devices';if(l.includes('cosmetic'))return 'Cosmetics';return raw||'Other';};const catLabel={"Human Medicines":"💊 HUMAN MEDICINES","Veterinary":"🐾 VETERINARY MEDICINES","Baby Care":"👶 BABY PRODUCTS","Pet Products":"🐶 PET PRODUCTS","Health":"🩺 HEALTH CARE","Devices":"🩹 MEDICAL DEVICES","Cosmetics":"💄 COSMETICS",Other:"📦 OTHER"};const groups={};[...zeroAlerts.map(p=>({...p,__kind:'OUT OF STOCK'})),...lowAlerts.map(p=>({...p,__kind:'LOW STOCK'}))].forEach(p=>{const c=catKey(p);(groups[c]||(groups[c]=[])).push(p)});const alerts=[];Object.keys(groups).sort((a,b)=>{const order=['Human Medicines','Veterinary','Baby Care','Pet Products','Health','Devices','Cosmetics','Other'];return (order.indexOf(a)<0?99:order.indexOf(a))-(order.indexOf(b)<0?99:order.indexOf(b))}).forEach(c=>{alerts.push('<div style="font-weight:800;font-size:16px;margin:12px 0 6px">'+esc(catLabel[c]||c)+'</div>');groups[c].forEach(p=>{const effective=effectiveStockById.get(String(p.id))||0;alerts.push('<div class="warning">'+esc(p.__kind+': '+p.name+' ('+effective+')')+'</div>')})});exp.forEach(b=>alerts.push('<div class="warning">'+esc(expiryStatus(b)+': '+(b.productName||b.productId)+' • Batch '+(b.batchNumber||'-')+' • '+b.expiryDate)+'</div>'));$('alerts').innerHTML=alerts.join('')||'<div class="good">No urgent stock or expiry alerts.</div>';
 $('recentBills').innerHTML=bills.slice(0,10).map(b=>billRow(b,true)).join('')||'<div class="small">No bills yet.</div>'}
 function renderSelects(){
  const selected=$('bMedicine').value,selectedPu=$('puProduct').value;
@@ -1119,17 +1120,43 @@ window.savePurchase=async()=>{
       if(purchaseReturnRowsForPurchase(purchase.id).length)return alert('This purchase has a supplier return recorded. For stock safety, it cannot be edited. Create a new purchase entry for any correction.');
       const originalProduct=products.find(x=>String(x.id)===String(purchase.productId)); if(!originalProduct)return alert('Original medicine/product not found.');
       if(String(product?.id||'')!==String(purchase.productId))return alert('For stock safety, the medicine cannot be changed while editing a purchase. Create a new purchase entry for another medicine.');
-      const oldBatchNumber=String(purchase.batchNumber||purchase.batch||''),oldBid=String(purchase.productId)+'__'+oldBatchNumber,newBid=String(purchase.productId)+'__'+batchNumber,newStockMovements=get('stockMovements',[]),oldBatch=batches.find(x=>String(x.id)===oldBid); if(!oldBatch)return alert('Original batch not found. Refresh data before editing.');
+      const oldBatchNumber=String(purchase.batchNumber||purchase.batch||'').trim(),recordedBatchId=String(purchase.batchId||''),canonicalOldBid=String(purchase.productId)+'__'+oldBatchNumber,newBid=String(purchase.productId)+'__'+batchNumber,newStockMovements=get('stockMovements',[]);
+      // Resolve legacy batch IDs without guessing. A recorded ID is accepted only
+      // when its product/batch metadata does not contradict this purchase.
+      const normBatch=v=>String(v??'').trim().toUpperCase();
+      const normName=v=>String(v??'').trim().replace(/\s+/g,' ').toLowerCase();
+      const productNameKey=normName(purchase.productName||originalProduct.name);
+      const batchLabel=x=>String(x.batchNumber||x.batch||'').trim() || String(x.id||'').split('__').slice(1).join('__').trim();
+      const recordedBatch=batches.find(x=>String(x.id||'')===recordedBatchId);
+      const canonicalBatch=batches.find(x=>String(x.id||'')===canonicalOldBid);
+      const validForPurchase=x=>!!x && (!x.productId || String(x.productId)===String(purchase.productId) || normName(x.productName)===productNameKey) && (!batchLabel(x) || normBatch(batchLabel(x))===normBatch(oldBatchNumber));
+      let oldBatch=(validForPurchase(recordedBatch)?recordedBatch:null) || (validForPurchase(canonicalBatch)?canonicalBatch:null);
+      // Legacy batches may have a changed/missing productId or may store the batch
+      // only in the ID. Resolve only a unique product+batch/name+batch candidate.
+      const oldBatchMatches=batches.filter(x=>normBatch(batchLabel(x))===normBatch(oldBatchNumber) && (String(x.productId||'')===String(purchase.productId) || normName(x.productName)===productNameKey));
+      if(!oldBatch&&oldBatchMatches.length===1)oldBatch=oldBatchMatches[0];
+      if(!oldBatch&&oldBatchMatches.length>1)return alert('More than one stock batch matches this medicine and batch number. No changes were made. Please check Batch Management.');
+      // Last safe legacy route: a purchase ledger movement can identify the exact
+      // batch record even when old purchase rows have no batchId field.
+      if(!oldBatch){
+        const purchaseMove=newStockMovements.find(m=>String(m.id||'')===String(purchase.id+'_SM'));
+        const moveBatchId=String(purchaseMove?.batchId||'');
+        const fromMove=batches.find(x=>String(x.id||'')===moveBatchId);
+        if(validForPurchase(fromMove))oldBatch=fromMove;
+      }
+      if(!oldBatch)return alert('Cannot safely identify this purchase batch in Stock. No data was changed. Check Batch Management for this medicine and batch '+oldBatchNumber+'.');
+      const actualOldBid=String(oldBatch.id||canonicalOldBid);
       const batchChanged=oldBatchNumber!==batchNumber;
-      const nonPurchaseMovements=newStockMovements.filter(m=>String(m.batchId||'')===oldBid&&String(m.id||'')!==String(purchase.id+'_SM')&&String(m.type||'').toUpperCase()!=='PURCHASE');
+      const nonPurchaseMovements=newStockMovements.filter(m=>String(m.id||'')!==String(purchase.id+'_SM')&&String(m.type||'').toUpperCase()!=='PURCHASE'&&(String(m.batchId||'')===actualOldBid||(String(m.productId||'')===String(purchase.productId)&&String(m.batchNumber||'').trim()===oldBatchNumber)));
       const otherPurchases=purchases.filter(x=>String(x.id)!==String(purchase.id)&&String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===batchNumber); const otherOldPurchases=purchases.filter(x=>String(x.id)!==String(purchase.id)&&String(x.productId)===String(purchase.productId)&&String(x.batchNumber||x.batch||'')===oldBatchNumber);
       if(batchChanged){
+        if(batches.some(x=>String(x.id||'')===newBid&&String(x.id||'')!==actualOldBid))return alert('A stock batch already exists with that batch number. No changes were made. Choose a different batch number.');
         if(nonPurchaseMovements.length)return alert('This batch has already been used in a bill/return/order. Its batch number cannot be changed safely.');
         if(otherPurchases.length)return alert('That target batch already has another purchase entry. Choose a different batch number.');
         if(otherOldPurchases.length)return alert('This original batch has other purchase entries, so changing this batch number could mix stock history. Correct the batch details without changing the batch number.');
         if(Number(oldBatch.stock||0)<Number(purchase.qty||0))return alert('This purchase has already been partly/fully used from stock, so its batch number cannot be changed safely.');
         const newBatch={...oldBatch,id:newBid,batchNumber,expiryDate,productName:purchase.productName,productId:purchase.productId,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,stock:Number(purchase.qty||0),mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total};
-        batches=batches.filter(x=>String(x.id)!==oldBid); batches.push(newBatch);
+        batches=batches.filter(x=>String(x.id)!==actualOldBid); batches.push(newBatch);
       }else{
         const oldQty=Number(purchase.qty||0),delta=qty-oldQty;
         if(delta<0&&Number(oldBatch.stock||0)<Math.abs(delta))return alert('Cannot reduce this purchase quantity because the batch does not have enough remaining stock. Some quantity has already been sold/used.');
@@ -1139,9 +1166,10 @@ window.savePurchase=async()=>{
         // purchase's commercial data. Batch keeps only operational/display values.
         Object.assign(oldBatch,{expiryDate,category,cat:category,schedule,manufacturer,manufacturerDetails:manufacturer,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0)});
       }
-      const updated={...purchase,productId:purchase.productId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
+      const targetBatchId=batchChanged?newBid:actualOldBid;
+      const updated={...purchase,productId:purchase.productId,batchId:targetBatchId,productName:purchase.productName||originalProduct.name,category,cat:category,schedule,qty,batchNumber,expiryDate,manufacturer,manufacturerDetails:manufacturer,supplier,invoice,purchaseDate:$('puDate').value||today(),purchasePrice:gst.base,purchaseGstRate:gst.rate,purchasePriceWithGst:gst.total,mrp:Number($('puMrp').value)||0,sellingPrice:Number($('puSell').value)||Number(originalProduct.price||0),minQty};
       const pi=purchases.findIndex(x=>String(x.id)===String(purchase.id)); if(pi>=0)purchases[pi]=updated;
-      const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:newBid,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
+      const mi=newStockMovements.findIndex(m=>String(m.id)===String(purchase.id+'_SM')); const move={id:purchase.id+'_SM',type:'PURCHASE',productId:purchase.productId,batchId:targetBatchId,batchNumber,qty,purchasePriceWithGst:gst.total,reference:invoice||'PURCHASE',createdAt:(mi>=0?newStockMovements[mi].createdAt:new Date().toISOString())}; if(mi>=0)newStockMovements[mi]={...newStockMovements[mi],...move};else newStockMovements.push(move);
       originalProduct.lowStockLevel=minQty; originalProduct.category=category; originalProduct.cat=category; if(schedule)originalProduct.schedule=schedule; if(manufacturer)Object.assign(originalProduct,{manufacturer,manufacturerDetails:manufacturer});
       originalProduct.price=Number($('puSell').value)||Number(originalProduct.price||0); originalProduct.mrp=Number($('puMrp').value)||0;
       // IMPORTANT: purchase cost/GST belong to the individual purchase record.
@@ -1331,7 +1359,7 @@ function renderBatches(){
   ensureExpiryReturnStyles();
   const live=batches.filter(b=>Number(b?.stock||0)>0&&expiryStatus(b)!=='EXPIRED'&&t(b?.expiryDate));
   const lowestId=live.length?String(live.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate))[0].id):'';
-  const rows=batches.filter(b=>Number(b?.stock||0)>0).slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{
+  const rows=batches.slice().sort((a,b)=>t(a.expiryDate)-t(b.expiryDate)).map(b=>{
     const st=expiryStatus(b),isNear=st==='NEAR EXPIRY'&&Number(b?.stock||0)>0,isLowest=String(b?.id||'')===lowestId;
     const flags=(isLowest?' <span class="expiry-lowest-badge">⚠️ LOWEST EXPIRY</span>':'')+(isNear?' <span class="expiry-blink-badge">⏳ NEAR EXPIRY</span>':'');
     const cls=isNear?' expiry-near-blink':'';
