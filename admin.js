@@ -655,16 +655,24 @@ function findMedicineBySearch(value){
  const contains=products.filter(p=>String(p.name||'').trim().toLowerCase().includes(q)); return contains.length===1?contains[0]:null;
 }
 function medicineMatches(q){
- q=String(q||'').trim().toLowerCase();
- if(!q)return products.slice(0,30);
- return products.filter(p=>String(p.name||'').toLowerCase().includes(q)).slice(0,30);
+ // Duplicate-safe suggestions: collapse display rows by normalized medicine name,
+ // but NEVER delete/merge underlying product IDs or their batch/history records here.
+ q=normMedicineName(q);
+ const seen=new Set(), out=[];
+ for(const p of products){
+   const key=normMedicineName(p?.name);
+   if(!key || (q && !key.includes(q)) || seen.has(key))continue;
+   seen.add(key); out.push(p);
+   if(out.length>=30)break;
+ }
+ return out;
 }
 function showMedicineSuggestions(inputId,boxId,onPick){
  const input=$(inputId),box=$(boxId); if(!input||!box)return;
  const render=()=>{
    const list=medicineMatches(input.value);
    if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
-   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
+   box.innerHTML=list.map(p=>{const sameName=products.filter(x=>normMedicineName(x.name)===normMedicineName(p.name));const sameIds=new Set(sameName.map(x=>String(x.id)));const available= inputId==='mcSearch' ? batches.filter(b=>(sameIds.has(String(b.productId))||sameName.some(x=>normMedicineName(b.productName||b.medicineName||'')===normMedicineName(x.name)))&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
    box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
       e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
       input.value=p.name; box.classList.remove('show'); onPick(p);
@@ -1109,6 +1117,10 @@ window.savePurchase=async()=>{
   const saveBtn=document.querySelector('#purchaseSaveBtn'); if(saveBtn){saveBtn.disabled=true;saveBtn.dataset.busy='1';}
   setTimeout(()=>{purchaseActionLock=false;if(saveBtn&&saveBtn.dataset.busy==='1'){saveBtn.disabled=false;delete saveBtn.dataset.busy;}},2600);
   const typedName=$('puProductSearch').value.trim(), selectedId=$('puProduct').value;
+  const exactNameMatches=products.filter(p=>normMedicineName(p.name)===normMedicineName(typedName));
+  // If legacy duplicate masters already exist, do not silently pick one during a new
+  // purchase: require explicit selection from suggestions so the stock goes to the intended ID.
+  if(!editingPurchaseId&&!selectedId&&exactNameMatches.length>1){purchaseActionLock=false;if(saveBtn){saveBtn.disabled=false;delete saveBtn.dataset.busy;}return alert('This medicine name already has multiple saved records. Select the correct existing medicine from the suggestions before saving. No stock was changed.');}
   let product=products.find(p=>p.id===selectedId)||findMedicineBySearch(typedName);
   const qty=Math.max(1,Number($('puQty').value)||0),minQty=Math.max(0,Number($('puMinQty')?.value)||0),batchNumber=$('puBatch').value.trim(),expiryDate=$('puExpiry').value,manufacturer=$('puManufacturer')?.value.trim()||(product?.manufacturer||product?.manufacturerDetails||''),supplier=$('puSupplier').value.trim(),invoice=$('puInvoice').value.trim();
   const gst=window.calculatePurchaseGst(); const category=$('puCategory')?.value||product?.cat||'Human Medicines';
