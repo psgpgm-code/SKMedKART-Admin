@@ -655,32 +655,16 @@ function findMedicineBySearch(value){
  const contains=products.filter(p=>String(p.name||'').trim().toLowerCase().includes(q)); return contains.length===1?contains[0]:null;
 }
 function medicineMatches(q){
- // Search suggestions are grouped by normalized medicine name, not by product ID.
- // Existing duplicate master rows remain untouched so stock/history is not destroyed.
  q=String(q||'').trim().toLowerCase();
- const seen=new Set(), out=[];
- const source=!q?products:products.filter(p=>String(p.name||'').toLowerCase().includes(q));
- for(const p of source){
-   const key=normMedicineName(p.name)||('id:'+String(p.id||''));
-   if(seen.has(key))continue;
-   seen.add(key);out.push(p);if(out.length>=30)break;
- }
- return out;
+ if(!q)return products.slice(0,30);
+ return products.filter(p=>String(p.name||'').toLowerCase().includes(q)).slice(0,30);
 }
 function showMedicineSuggestions(inputId,boxId,onPick){
  const input=$(inputId),box=$(boxId); if(!input||!box)return;
  const render=()=>{
    const list=medicineMatches(input.value);
    if(!list.length){box.innerHTML='<div class="medicineOption"><small>No medicine found</small></div>';box.classList.add('show');return}
-   box.innerHTML=list.map(p=>{
-     const sameName=products.filter(x=>normMedicineName(x.name)===normMedicineName(p.name));
-     const ids=new Set(sameName.map(x=>String(x.id)));
-     const related=batches.filter(b=>ids.has(String(b.productId||'')) || normMedicineName(b.productName||b.medicineName||b.medicine||b.name)===normMedicineName(p.name));
-     const available=related.length
-       ? related.filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0)
-       : sameName.reduce((sum,x)=>sum+Math.max(0,Number(x.stock||0)),0);
-     return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'
-   }).join('');
+   box.innerHTML=list.map(p=>{const available= inputId==='mcSearch' ? batchesForProduct(p).filter(b=>Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').reduce((sum,b)=>sum+Number(b.stock||0),0) : Number(p.stock||0);return '<div class="medicineOption" data-id="'+esc(p.id)+'"><b>'+esc(p.name)+'</b><small>Available stock: '+available+'</small></div>'}).join('');
    box.querySelectorAll('.medicineOption[data-id]').forEach(el=>el.addEventListener('pointerdown',e=>{
       e.preventDefault(); const p=products.find(x=>x.id===el.dataset.id); if(!p)return;
       input.value=p.name; box.classList.remove('show'); onPick(p);
@@ -712,29 +696,8 @@ showMedicineSuggestions('bMedicineSearch','bMedicineSuggest',pickBillMedicine);
 showMedicineSuggestions('puProductSearch','puMedicineSuggest',pickPurchaseMedicine);
 showMedicineSuggestions('mcSearch','mcSuggest',p=>{if(p){$('mcSearch').value=p.name;window.checkMedicineAvailability()}});
 $('mcSearch')?.addEventListener('input',()=>{if($('mcSearch').value.trim())window.checkMedicineAvailability();else if($('mcResult'))$('mcResult').innerHTML='<div class="small">Search any medicine to check availability.</div>'});
-window.updateBatchOptions=()=>{
- const pid=String($('bMedicine').value||'');
- const selected=products.find(p=>String(p.id)===pid);
- const nameKey=normMedicineName(selected?.name);
- // Billing must show saleable batches belonging to every legacy duplicate row
- // of the same exact medicine name. Each option retains its real batch ID.
- const ids=new Set(products.filter(p=>nameKey&&normMedicineName(p.name)===nameKey).map(p=>String(p.id)));
- const bs=batches.filter(b=>(ids.has(String(b.productId||'')) || (!!nameKey&&normMedicineName(b.productName||b.medicineName||b.medicine||b.name)===nameKey))&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));
- $('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber||'-')+' • Exp '+esc(b.expiryDate||'-')+' • Stock '+Number(b.stock||0)+'</option>').join('');
-};
-$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>String(p.id)===String(b.productId))?.price||0)});
-window.addBillItem=()=>{
- if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}
- const selectedPid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);
- const b=batches.find(x=>String(x.id)===String(bid));
- // The chosen batch's owning product ID is authoritative for stock deductions.
- const pid=String(b?.productId||selectedPid);const p=products.find(x=>String(x.id)===pid)||products.find(x=>String(x.id)===String(selectedPid));
- if(!p||!b)return alert('Select medicine and batch.');
- if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');
- const already=billCart.filter(x=>String(x.batchId)===String(bid)).reduce((sum,x)=>sum+Number(x.qty||0),0);
- if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');
- billCart.push({productId:pid,name:p.name,batchId:b.id,batchNumber:b.batchNumber,expiryDate:b.expiryDate,manufacturer:b.manufacturer||b.manufacturerDetails||p.manufacturer||p.manufacturerDetails||'',qty,price});renderBilling()
-};
+window.updateBatchOptions=()=>{const pid=$('bMedicine').value;const bs=batches.filter(b=>b.productId===pid&&Number(b.stock||0)>0&&expiryStatus(b)!=='EXPIRED').sort((a,b)=>t(a.expiryDate)-t(b.expiryDate));$('bBatch').innerHTML='<option value="">Select batch</option>'+bs.map(b=>'<option value="'+esc(b.id)+'">'+esc(b.batchNumber)+' • Exp '+esc(b.expiryDate)+' • Stock '+Number(b.stock||0)+'</option>').join('')};$('bBatch').addEventListener('change',()=>{const b=batches.find(x=>x.id===$('bBatch').value);if(b)$('bPrice').value=Number(b.sellingPrice||products.find(p=>p.id===b.productId)?.price||0)});
+window.addBillItem=()=>{if(!$('bMedicine').value){const typed=findMedicineBySearch($('bMedicineSearch').value);if(typed)pickBillMedicine(typed)}const pid=$('bMedicine').value,bid=$('bBatch').value,qty=Math.max(1,Number($('bQty').value)||1),price=Math.max(0,Number($('bPrice').value)||0);const p=products.find(x=>x.id===pid),b=batches.find(x=>x.id===bid);if(!p||!b)return alert('Select medicine and batch.');if(expiryStatus(b)==='EXPIRED')return alert('Expired batch cannot be billed.');const already=billCart.filter(x=>x.batchId===bid).reduce((s,x)=>s+x.qty,0);if(Number(b.stock||0)<already+qty)return alert('Insufficient batch stock.');billCart.push({productId:pid,name:p.name,batchId:bid,batchNumber:b.batchNumber,expiryDate:b.expiryDate,manufacturer:b.manufacturer||b.manufacturerDetails||p.manufacturer||p.manufacturerDetails||'',qty,price});renderBilling()};
 /* Bill discount can be either a flat rupee amount or a percentage. */
 window.setDiscountType=(type)=>{
   discountType=type==='percent'?'percent':'flat';
